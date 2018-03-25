@@ -1,7 +1,7 @@
 #include "spin_latch.h"
 #include "PMwCAS.h"
 
-void init_pool(mdesc_pool_t pool)
+void pmwcas_init(mdesc_pool_t pool)
 {
 	for (off_t i = 0; i < DESCRIPTOR_POOL_SIZE; ++i)
 	{
@@ -10,21 +10,14 @@ void init_pool(mdesc_pool_t pool)
 	}
 }
 
-mdesc_t alloc_PMwCAS(mdesc_pool_t pool, off_t search_pos) 
+mdesc_t pmwcas_alloc(mdesc_pool_t pool, off_t search_pos) 
 {
 	for (off_t i = 0; i < DESCRIPTOR_POOL_SIZE; ++i)
 	{
 		off_t pos = (i + search_pos) % DESCRIPTOR_POOL_SIZE;
 		if (pool->mdescs[pos].status == ST_FREE)
 		{
-			/*
-			* set dirty bit in status
-			* in case a failure occurs before safe memory transfer
-			* recovery may reclaim descriptors with dirty bit set
-			* alloc user needs to persist and unset dirty bit
-			* before any use after the alloc called
-			*/
-			uint64_t r = CAS(&pool->mdescs[pos].status, ST_UNDECIDED | DIRTY_BIT, ST_FREE);
+			uint64_t r = CAS(&pool->mdescs[pos].status, ST_UNDECIDED, ST_FREE);
 			if (r == ST_FREE)
 			{
 				pool->mdescs[pos].count = 0;
@@ -36,12 +29,12 @@ mdesc_t alloc_PMwCAS(mdesc_pool_t pool, off_t search_pos)
 	return nullptr;
 }
 
-void free_PMwCAS(mdesc_t mdesc, gc_t * gc) 
+void pmwcas_free(mdesc_t mdesc, gc_t * gc) 
 {
 	gc_limbo(gc, (void*)mdesc);
 }
 
-void reclaim_PMwCAS(gc_entry_t *entry, void *arg)
+void pmwcas_reclaim(gc_entry_t *entry, void *arg)
 {
 	gc_t *gc = (gc_t *)arg;
 	const off_t off = gc->entry_off;
@@ -64,7 +57,7 @@ void reclaim_PMwCAS(gc_entry_t *entry, void *arg)
 * we don't persist memory until the app caller
 * issues a PMwCAS
 */
-bool add_entry(PMEMobjpool *pop, mdesc_t mdesc, uint64_t * addr, uint64_t expect, uint64_t new_val, off_t recycle) 
+bool pmwcas_add(mdesc_t mdesc, uint64_t * addr, uint64_t expect, uint64_t new_val, off_t recycle) 
 {
 	off_t insert_point = (off_t)mdesc->count, i;
 	wdesc_t wdesc = mdesc->wdescs;
@@ -89,58 +82,20 @@ bool add_entry(PMEMobjpool *pop, mdesc_t mdesc, uint64_t * addr, uint64_t expect
 			insert_point = i;
 		}
 	}
-	TX_BEGIN(pop) {
-		pmemobj_tx_add_range_direct(mdesc->wdescs + insert_point, 
-			(mdesc->count - insert_point + 1) * sizeof(*mdesc->wdescs));
-		if (insert_point != mdesc->count)
-			memmove(mdesc->wdescs + insert_point + 1,
-				mdesc->wdescs + insert_point, 
-				(mdesc->count - insert_point) * sizeof(*mdesc->wdescs));
+	if (insert_point != mdesc->count)
+		memmove(mdesc->wdescs + insert_point + 1,
+			mdesc->wdescs + insert_point, 
+			(mdesc->count - insert_point) * sizeof(*mdesc->wdescs));
 		
-		mdesc->wdescs[insert_point].addr = addr;
-		mdesc->wdescs[insert_point].expect = expect;
-		mdesc->wdescs[insert_point].new_val = new_val;
-		mdesc->wdescs[insert_point].mdesc = mdesc;
-		mdesc->wdescs[insert_point].recycle_func = recycle;
-		
-		pmemobj_tx_add_range_direct(&mdesc->count, sizeof(uint64_t));
-		++mdesc->count;
-	} TX_END;
+	mdesc->wdescs[insert_point].addr = addr;
+	mdesc->wdescs[insert_point].expect = expect;
+	mdesc->wdescs[insert_point].new_val = new_val;
+	mdesc->wdescs[insert_point].mdesc = mdesc;
+	mdesc->wdescs[insert_point].recycle_func = recycle;
+
+	++mdesc->count;
 	
 	return true;
-}
-
-void *reserve_entry(PMEMobjpool *pop, mdesc_t mdesc, uint64_t *addr, uint64_t expect, off_t recycle)
-{
-	off_t i;
-	wdesc_t wdesc;
-	if (mdesc->count == WORD_DESCRIPTOR_SIZE)
-	{
-		return false;
-	}
-	for (i = 0; i < mdesc->count; ++i)
-	{
-		wdesc = mdesc->wdescs + i;
-		if (wdesc->addr > addr)
-		{
-			break;
-		}
-	}
-	TX_BEGIN(pop) {
-		pmemobj_tx_add_range_direct(mdesc->wdescs + i, 
-			(mdesc->count - i + 1) * sizeof(mdesc->wdescs[i]));
-		
-		memmove(wdesc + 1, wdesc, (mdesc->count - i) * sizeof(*wdesc));
-		
-		mdesc->wdescs[i].addr = addr;
-		mdesc->wdescs[i].expect = expect;
-		mdesc->wdescs[i].mdesc = mdesc;
-		mdesc->wdescs[i].recycle_func = recycle;
-		
-		pmemobj_tx_add_range_direct(&mdesc->count, sizeof(uint64_t));
-		++mdesc->count;
-	} TX_END;
-	return (void *)&mdesc->wdescs[i].new_val;
 }
 
 bool is_RDCSS(uint64_t val)
@@ -158,7 +113,7 @@ bool is_dirty(uint64_t val)
 	return (val & DIRTY_BIT) != 0ULL;
 }
 
-void persist_clear_dirty_bit(uint64_t *addr, uint64_t val)
+void persist_clear(uint64_t *addr, uint64_t val)
 {
 	persist(addr, sizeof(uint64_t));
 	CAS(addr, val & ~DIRTY_BIT, val);
@@ -192,11 +147,8 @@ uint64_t install_mdesc(wdesc_t wdesc)
 	return r;
 }
 
-bool PMwCAS(mdesc_t mdesc)
+bool pmwcas_commit(mdesc_t mdesc)
 {
-	/* clear dirty bit in status and start PMwCAS */
-	persist_clear_dirty_bit((uint64_t*)&mdesc->status, ST_UNDECIDED | DIRTY_BIT);
-
 	uint64_t status = ST_SUCCESS;
 	for (off_t i = 0; status == ST_SUCCESS && i < mdesc->count; ++i) 
 	{
@@ -225,9 +177,9 @@ bool PMwCAS(mdesc_t mdesc)
 					/*
 					* make sure what we read is persistent
 					*/
-					persist_clear_dirty_bit(wdesc->addr, r);
+					persist_clear(wdesc->addr, r);
 				}
-				PMwCAS(mdesc_t(r & ADDR_MASK));
+				pmwcas_commit(mdesc_t(r & ADDR_MASK));
 				/*
 				* retry install
 				*/
@@ -249,7 +201,7 @@ bool PMwCAS(mdesc_t mdesc)
 		for (off_t i = 0; i < mdesc->count; ++i)
 		{
 			wdesc_t wdesc = mdesc->wdescs + i;
-			persist_clear_dirty_bit(wdesc->addr, mdesc_ptr);
+			persist_clear(wdesc->addr, mdesc_ptr);
 		}
 	}
 
@@ -257,7 +209,7 @@ bool PMwCAS(mdesc_t mdesc)
 	* finalize MwCAS status
 	*/
 	CAS(&mdesc->status, status | DIRTY_BIT, ST_UNDECIDED);
-	persist_clear_dirty_bit(&mdesc->status, mdesc->status);
+	persist_clear(&mdesc->status, mdesc->status);
 
 	/*
 	* install the final value for each word
@@ -276,12 +228,12 @@ bool PMwCAS(mdesc_t mdesc)
 		{
 			CAS(wdesc->addr, val, mdesc_ptr & ~DIRTY_BIT);
 		}
-		persist_clear_dirty_bit(wdesc->addr, val);
+		persist_clear(wdesc->addr, val);
 	}
 	return mdesc->status == ST_SUCCESS;
 }
 
-uint64_t pread(uint64_t * addr)
+uint64_t pmwcas_read(uint64_t * addr)
 {
 	uint64_t r;
 	do 
@@ -294,12 +246,12 @@ uint64_t pread(uint64_t * addr)
 		}
 		if (is_dirty(r))
 		{
-			persist_clear_dirty_bit(addr, r);
+			persist_clear(addr, r);
 			r &= ~DIRTY_BIT;
 		}
 		if (is_MwCAS(r))
 		{
-			PMwCAS(mdesc_t(r & ADDR_MASK));
+			pmwcas_commit(mdesc_t(r & ADDR_MASK));
 			continue;
 		}
 	} while (false);
@@ -312,7 +264,7 @@ uint64_t pread(uint64_t * addr)
 * 2) finish success PMwCAS
 * 3) reclaim PMwCAS descriptor
 */
-void recovery_PMwCAS(mdesc_pool_t pool)
+void pmwcas_recovery(mdesc_pool_t pool)
 {
 	for (off_t i = 0; i < DESCRIPTOR_POOL_SIZE; ++i)
 	{

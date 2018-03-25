@@ -35,8 +35,8 @@
 
 typedef void(*recycle_func_t)(void*);
 typedef struct word_entry * wdesc_t;
-typedef struct PMwCAS_entry * mdesc_t;
-typedef struct descriptor_pool * mdesc_pool_t;
+typedef struct pmwcas_entry * mdesc_t;
+typedef struct pmwcas_pool * mdesc_pool_t;
 
 struct word_entry
 {
@@ -47,7 +47,7 @@ struct word_entry
 	off_t				recycle_func;
 };
 
-struct PMwCAS_entry
+struct pmwcas_entry
 {
 	uint64_t			status;
 	gc_entry_t			gc_entry;
@@ -56,26 +56,26 @@ struct PMwCAS_entry
 	word_entry			wdescs[WORD_DESCRIPTOR_SIZE];
 };
 
-struct descriptor_pool
+struct pmwcas_pool
 {
 	recycle_func_t		callbacks[CALLBACK_SIZE];
-	PMwCAS_entry		mdescs[DESCRIPTOR_POOL_SIZE];
+	pmwcas_entry		mdescs[DESCRIPTOR_POOL_SIZE];
 };
 
-void init_pool(mdesc_pool_t pool);
+void pmwcas_init(mdesc_pool_t pool);
 
-void recovery_PMwCAS(mdesc_pool_t pool);
+void pmwcas_recovery(mdesc_pool_t pool);
 
-mdesc_t alloc_PMwCAS(mdesc_pool_t pool, off_t search_pos);
+mdesc_t pmwcas_alloc(mdesc_pool_t pool, off_t search_pos);
 
-void free_PMwCAS(mdesc_t mdesc, gc_t * gc);
+void pmwcas_free(mdesc_t mdesc, gc_t * gc);
 
-void reclaim_PMwCAS(gc_entry_t *entry, void *arg);
+void pmwcas_reclaim(gc_entry_t *entry, void *arg);
 
-bool add_entry(PMEMobjpool *pop, mdesc_t mdesc, uint64_t * addr, uint64_t expect, uint64_t new_val, off_t recycle);
+bool pmwcas_add(mdesc_t mdesc, uint64_t * addr, uint64_t expect, uint64_t new_val, off_t recycle);
 
-bool PMwCAS(mdesc_t mdesc);
+bool pmwcas_commit(mdesc_t mdesc);
 
-uint64_t pread(uint64_t * addr);
+uint64_t pmwcas_read(uint64_t * addr);
 
 #endif // !PMwCAS

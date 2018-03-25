@@ -15,8 +15,8 @@ PMEMobjpool * pop;
 
 void sys_init(mdesc_pool_t pool)
 {
-	gc = gc_create(offsetof(obj_t, gc_entry), reclaim_PMwCAS, gc);
-	recovery_PMwCAS(pool);
+	gc = gc_create(offsetof(obj_t, gc_entry), pmwcas_reclaim, gc);
+	pmwcas_recovery(pool);
 	assert(gc != NULL);
 }
 
@@ -30,8 +30,8 @@ void reader(mdesc_pool_t pool, uint64_t * addr)
 	* they actively reference any objects.
 	*/
 	gc_crit_enter(gc);
-	mdesc_t mdesc = alloc_PMwCAS(pool, 0);
-	mdesc_t mdesc2 = alloc_PMwCAS(pool, 0);
+	mdesc_t mdesc = pmwcas_alloc(pool, 0);
+	mdesc_t mdesc2 = pmwcas_alloc(pool, 0);
 
 	if (mdesc == nullptr)
 	{
@@ -39,11 +39,11 @@ void reader(mdesc_pool_t pool, uint64_t * addr)
 		goto END;
 	}
 	for (off_t i = 2; i >= 0; --i)
-		if (!add_entry(pop, mdesc, addr + i, 0, i * 10 + 1, 0))
+		if (!pmwcas_add(pop, mdesc, addr + i, 0, i * 10 + 1, 0))
 			cout << "err add_entry " << i << endl;
 
 	for (off_t i = 0; i <= 2; ++i)
-		if (!add_entry(pop, mdesc, addr + i, i * 10 + 1, i * 10 + 2, 0))
+		if (!pmwcas_add(pop, mdesc, addr + i, i * 10 + 1, i * 10 + 2, 0))
 			cout << "err add_entry " << i << endl;
 
 	if (mdesc2 == nullptr)
@@ -52,20 +52,20 @@ void reader(mdesc_pool_t pool, uint64_t * addr)
 		goto END;
 	}
 	for (off_t i = 1; i < 4; ++i)
-		if (!add_entry(pop, mdesc2, addr + i, i * 10 + 1, i * 10 + 3, 0))
+		if (!pmwcas_add(pop, mdesc2, addr + i, i * 10 + 1, i * 10 + 3, 0))
 			cout << "err add_entry " << i << endl;
 
-	if (PMwCAS(mdesc))
+	if (pmwcas_commit(mdesc))
 		cout << "mdesc1 success!" << endl;
 	else
 		cout << "mdesc1 failed!" << endl;
-	if (PMwCAS(mdesc2))
+	if (pmwcas_commit(mdesc2))
 		cout << "mdesc2 success!" << endl;
 	else
 		cout << "mdesc2 failed!" << endl;
 
-	free_PMwCAS(mdesc, gc);
-	free_PMwCAS(mdesc2, gc);
+	pmwcas_free(mdesc, gc);
+	pmwcas_free(mdesc2, gc);
 END:
 	gc_crit_exit(gc);
 	gc_cycle(gc);
@@ -95,7 +95,7 @@ void writer(obj_t *obj)
 struct root
 {
 	uint64_t nums[10];
-	descriptor_pool pool;
+	pmwcas_pool pool;
 };
 
 void tfunc(off_t off)
@@ -114,7 +114,7 @@ int main() {
 	
 	root* rp = (root *)pmemobj_direct(pmemobj_root(pop, sizeof(root)));
 	sys_init(&rp->pool);
-	//init_pool(&rp->pool);
+	//pmwcas_init(&rp->pool);
 	reader(&rp->pool, rp->nums);
 	for (off_t i = 0; i < 6; ++i)
 		cout << "final " << rp->nums[i] << endl;
@@ -133,7 +133,7 @@ int _main() {
 	root* rp = (root *)pmemobj_direct(pmemobj_root(pop, sizeof(root)));
 	auto x = rp->pool;
 	//gc_init();
-	//init_pool(&rp->pool);
+	//pmwcas_init(&rp->pool);
 	//reader(&rp->pool, rp->nums);
 	for (off_t i = 0; i < 6; ++i)
 		cout << "final " << rp->nums[i] << endl;
