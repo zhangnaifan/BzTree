@@ -3,25 +3,62 @@
 #include <assert.h>
 #include "PMwCAS.h"
 
+
 using namespace std;
 
-typedef struct {
-	int val = 3;
-	gc_entry_t	gc_entry;
-} obj_t;
 
-static gc_t *	gc;
+struct Obj {
+	uint64_t val;
+	rel_ptr<Obj> left, right;
+	Obj(uint64_t x) : val(x) {};
+};
+
+UCHAR* rel_ptr<Obj>::base_address;
+
+struct root
+{
+	pmwcas_pool pool;
+	Obj objs[100];
+};
+
+gc_t *	gc;
 PMEMobjpool * pop;
 
-void sys_init(mdesc_pool_t pool)
+void first_use(root * rp)
 {
-	gc = gc_create(offsetof(obj_t, gc_entry), pmwcas_reclaim, gc);
-	pmwcas_recovery(pool);
+
+	pmwcas_first_use(&rp->pool);
+	for (off_t i = 0; i < 100; ++i) {
+		rp->objs[i].val = i + 1;
+		rp->objs[i].left.set_null();
+		rp->objs[i].right.set_null();
+		persist(rp->objs + i, 8);
+	}
+}
+
+void sys_init(root* rp)
+{
+	rel_ptr<Obj>::set_base((UCHAR*)rp);
+	pmwcas_init((UCHAR*)rp);
+	pmwcas_recovery(&rp->pool);
+	gc = gc_create(offsetof(pmwcas_entry, gc_entry), pmwcas_reclaim, gc);
 	assert(gc != NULL);
 }
 
-void reader(mdesc_pool_t pool, uint64_t * addr) 
+int constr(PMEMobjpool *pop, void* ptr, void *arg)
 {
+	Obj * p = (Obj*)ptr;
+	p->val = (uint64_t)arg;
+	p->left.set_null();
+	p->right.set_null();
+	pmemobj_persist(pop, p, sizeof(Obj));
+	return 0;
+}
+
+void construct(mdesc_pool_t pool, root * rp, off_t off) 
+{
+	Obj ooo(6767);
+
 	gc_register(gc);
 
 	/*
@@ -31,55 +68,68 @@ void reader(mdesc_pool_t pool, uint64_t * addr)
 	*/
 	gc_crit_enter(gc);
 	mdesc_t mdesc = pmwcas_alloc(pool, 0);
-	mdesc_t mdesc2 = pmwcas_alloc(pool, 0);
-
-	if (mdesc == nullptr)
+	rel_ptr<Obj>* poo;
+	if (mdesc.is_null())
 	{
 		cout << "err alloc_PMwCAS" << endl;
-		goto END;
+		
 	}
-	for (off_t i = 2; i >= 0; --i)
-		if (!pmwcas_add(pop, mdesc, addr + i, 0, i * 10 + 1, 0))
-			cout << "err add_entry " << i << endl;
+	if (poo = pmwcas_reserve<Obj>(mdesc, 
+		(uint64_t*)&rp->objs[off].left, 
+		rp->objs[off].left,
+		0ULL))
+		cout << "add success!" << endl;
+	else
+		cout << "add failed !" << endl;
 
-	for (off_t i = 0; i <= 2; ++i)
-		if (!pmwcas_add(pop, mdesc, addr + i, i * 10 + 1, i * 10 + 2, 0))
-			cout << "err add_entry " << i << endl;
-
-	if (mdesc2 == nullptr)
-	{
-		cout << "err alloc_PMwCAS" << endl;
-		goto END;
+	auto tmp = rel_ptr<Obj>(rp->objs + 34);
+	
+	*poo = tmp;
+	
+	if (pmwcas_commit(mdesc)) {
+		cout << "mdesc " << off << " success!" << endl;
 	}
-	for (off_t i = 1; i < 4; ++i)
-		if (!pmwcas_add(pop, mdesc2, addr + i, i * 10 + 1, i * 10 + 3, 0))
-			cout << "err add_entry " << i << endl;
-
-	if (pmwcas_commit(mdesc))
-		cout << "mdesc1 success!" << endl;
 	else
-		cout << "mdesc1 failed!" << endl;
-	if (pmwcas_commit(mdesc2))
-		cout << "mdesc2 success!" << endl;
-	else
-		cout << "mdesc2 failed!" << endl;
+		cout << "mdesc "<<off<<" failed!" << endl;
 
 	pmwcas_free(mdesc, gc);
-	pmwcas_free(mdesc2, gc);
 END:
 	gc_crit_exit(gc);
 	gc_cycle(gc);
+	cout << "left " << rp->objs[0].left->val << endl;
+
 }
 
-void writer(obj_t *obj)
+
+int main() {
+	
+	const char * pool_file = "pool.pool";
+	const char * layout = "layout_id";
+	
+	//remove(pool_file);
+	//pop = pmemobj_createU(pool_file, layout, 8000000+ PMEMOBJ_MIN_POOL, 0666);
+	
+	pop = pmemobj_openU(pool_file, layout);
+	
+	root* rp = (root *)pmemobj_direct(pmemobj_root(pop, sizeof(root)));
+	//first_use(rp);
+	sys_init(rp);
+	construct(&rp->pool, rp, 0);
+
+	system("pause");
+	return 0;
+}
+
+void writer()
 {
+	Obj obj(2);
 	/*
 	* Remove the object from the lock-free container.  The
 	* object is no longer globally visible.  Not it can be
 	* staged for destruction -- add it to the limbo list.
 	*/
 	//obj = lockfree_remove(container, key);
-	gc_limbo(gc, (void *)obj);
+	gc_limbo(gc, (void *)&obj);
 
 	/*
 	* Checkpoint: run a G/C cycle attempting to reclaim *some*
@@ -90,53 +140,4 @@ void writer(obj_t *obj)
 	* mutex or by running in a single-threaded manner).
 	*/
 	gc_cycle(gc);
-}
-
-struct root
-{
-	uint64_t nums[10];
-	pmwcas_pool pool;
-};
-
-void tfunc(off_t off)
-{
-
-}
-
-int main() {
-	const char * pool_file = "pool.pool";
-	const char * layout = "layout_id";
-	
-	//remove(pool_file);
-	//pop = pmemobj_createU(pool_file, layout, 8000000+ PMEMOBJ_MIN_POOL + sizeof(descriptor_pool), 0666);
-	
-	pop = pmemobj_openU(pool_file, layout);
-	
-	root* rp = (root *)pmemobj_direct(pmemobj_root(pop, sizeof(root)));
-	sys_init(&rp->pool);
-	//pmwcas_init(&rp->pool);
-	reader(&rp->pool, rp->nums);
-	for (off_t i = 0; i < 6; ++i)
-		cout << "final " << rp->nums[i] << endl;
-	system("pause");
-	return 0;
-}
-int _main() {
-	const char * pool_file = "pool.pool";
-	const char * layout = "layout_id";
-
-	//remove(pool_file);
-	//pop = pmemobj_createU(pool_file, layout, 8000000 + PMEMOBJ_MIN_POOL + sizeof(descriptor_pool), 0666);
-
-	pop = pmemobj_openU(pool_file, layout);
-
-	root* rp = (root *)pmemobj_direct(pmemobj_root(pop, sizeof(root)));
-	auto x = rp->pool;
-	//gc_init();
-	//pmwcas_init(&rp->pool);
-	//reader(&rp->pool, rp->nums);
-	for (off_t i = 0; i < 6; ++i)
-		cout << "final " << rp->nums[i] << endl;
-	system("pause");
-	return 0;
 }

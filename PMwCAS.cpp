@@ -1,7 +1,11 @@
 #include "spin_latch.h"
 #include "PMwCAS.h"
 
-void pmwcas_init(mdesc_pool_t pool)
+template<typename T>
+UCHAR* rel_ptr<T>::base_address(nullptr);
+
+/* set desc status to FREE */
+void pmwcas_first_use(mdesc_pool_t pool)
 {
 	for (off_t i = 0; i < DESCRIPTOR_POOL_SIZE; ++i)
 	{
@@ -10,6 +14,15 @@ void pmwcas_init(mdesc_pool_t pool)
 	}
 }
 
+/* set base address */
+void pmwcas_init(UCHAR* base)
+{
+	rel_ptr<uint64_t>::set_base(base);
+	rel_ptr<word_entry>::set_base(base);
+	rel_ptr<pmwcas_entry>::set_base(base);
+}
+
+/* allocate a PMwCAS desc; return base_address if failed */
 mdesc_t pmwcas_alloc(mdesc_pool_t pool, off_t search_pos) 
 {
 	for (off_t i = 0; i < DESCRIPTOR_POOL_SIZE; ++i)
@@ -26,14 +39,16 @@ mdesc_t pmwcas_alloc(mdesc_pool_t pool, off_t search_pos)
 			}
 		}
 	}
-	return nullptr;
+	return mdesc_t::null();
 }
 
+/* add PMwCAS entry to gc list */
 void pmwcas_free(mdesc_t mdesc, gc_t * gc) 
 {
-	gc_limbo(gc, (void*)mdesc);
+	gc_limbo(gc, mdesc.abs());
 }
 
+/* reset desc status to FREE */
 void pmwcas_reclaim(gc_entry_t *entry, void *arg)
 {
 	gc_t *gc = (gc_t *)arg;
@@ -53,11 +68,10 @@ void pmwcas_reclaim(gc_entry_t *entry, void *arg)
 }
 
 /*
-* single thread function
-* we don't persist memory until the app caller
-* issues a PMwCAS
+* add a word entry to PMwCAS desc
+* expect and new_val must be common variables whose higher 12 bits are 0
 */
-bool pmwcas_add(mdesc_t mdesc, uint64_t * addr, uint64_t expect, uint64_t new_val, off_t recycle) 
+bool pmwcas_add(mdesc_t mdesc, rel_ptr<uint64_t> addr, uint64_t expect, uint64_t new_val, off_t recycle) 
 {
 	off_t insert_point = (off_t)mdesc->count, i;
 	wdesc_t wdesc = mdesc->wdescs;
@@ -94,46 +108,54 @@ bool pmwcas_add(mdesc_t mdesc, uint64_t * addr, uint64_t expect, uint64_t new_va
 	mdesc->wdescs[insert_point].recycle_func = recycle;
 
 	++mdesc->count;
-	
 	return true;
 }
 
-bool is_RDCSS(uint64_t val)
+/* 
+* add a word desc to PMwCAS desc
+* expect and new_val are rel_ptr
+*/
+bool pmwcas_add(mdesc_t mdesc, rel_ptr<uint64_t> addr, rel_ptr<uint64_t> expect, rel_ptr<uint64_t> new_val, off_t recycle)
+{
+	return pmwcas_add(mdesc, addr, expect.rel(), new_val.rel(), recycle);
+}
+
+inline bool is_RDCSS(uint64_t val)
 {
 	return (val & RDCSS_BIT) != 0ULL;
 }
 
-bool is_MwCAS(uint64_t val)
+inline bool is_MwCAS(uint64_t val)
 {
 	return (val & MwCAS_BIT) != 0ULL;
 }
 
-bool is_dirty(uint64_t val)
+inline bool is_dirty(uint64_t val)
 {
 	return (val & DIRTY_BIT) != 0ULL;
 }
 
-void persist_clear(uint64_t *addr, uint64_t val)
+inline void persist_clear(uint64_t *addr, uint64_t val)
 {
 	persist(addr, sizeof(uint64_t));
 	CAS(addr, val & ~DIRTY_BIT, val);
 }
 
-void complete_install(wdesc_t wdesc)
+inline void complete_install(wdesc_t wdesc)
 {
-	uint64_t mdesc_ptr = (uint64_t)wdesc->mdesc | MwCAS_BIT | DIRTY_BIT;
-	uint64_t wdesc_ptr = (uint64_t)wdesc | RDCSS_BIT;
+	uint64_t mdesc_ptr = wdesc->mdesc.rel() | MwCAS_BIT | DIRTY_BIT;
+	uint64_t wdesc_ptr = wdesc.rel() | RDCSS_BIT;
 	bool test = wdesc->mdesc->status == ST_UNDECIDED;
-	CAS(wdesc->addr, test ? mdesc_ptr : wdesc->expect, wdesc_ptr);
+	CAS(wdesc->addr.abs(), test ? mdesc_ptr : wdesc->expect, wdesc_ptr);
 }
 
-uint64_t install_mdesc(wdesc_t wdesc)
+inline uint64_t install_mdesc(wdesc_t wdesc)
 {
-	uint64_t ptr = (uint64_t)wdesc | RDCSS_BIT;
+	uint64_t ptr = wdesc.rel() | RDCSS_BIT;
 	uint64_t r;
 	do 
 	{
-		r = CAS(wdesc->addr, ptr, wdesc->expect);
+		r = CAS(wdesc->addr.abs(), ptr, wdesc->expect);
 		if (is_RDCSS(r))
 		{
 			complete_install(wdesc_t(r & ADDR_MASK));
@@ -158,7 +180,7 @@ bool pmwcas_commit(mdesc_t mdesc)
 			* try to install a pointer to mdesc for tha target word
 			*/
 			uint64_t r = install_mdesc(wdesc);
-			if (r == wdesc->expect || (r & ADDR_MASK) == (uint64_t)mdesc)
+			if (r == wdesc->expect || (r & ADDR_MASK) == mdesc.rel())
 			{
 				/*
 				* successful CAS install
@@ -177,7 +199,7 @@ bool pmwcas_commit(mdesc_t mdesc)
 					/*
 					* make sure what we read is persistent
 					*/
-					persist_clear(wdesc->addr, r);
+					persist_clear(wdesc->addr.abs(), r);
 				}
 				pmwcas_commit(mdesc_t(r & ADDR_MASK));
 				/*
@@ -191,7 +213,7 @@ bool pmwcas_commit(mdesc_t mdesc)
 			status = ST_FAILED;
 		} while (false);
 	}
-	uint64_t mdesc_ptr = (uint64_t)mdesc | DIRTY_BIT | MwCAS_BIT;
+	uint64_t mdesc_ptr = mdesc.rel() | DIRTY_BIT | MwCAS_BIT;
 	
 	/*
 	* make sure that every target word is installed
@@ -201,7 +223,7 @@ bool pmwcas_commit(mdesc_t mdesc)
 		for (off_t i = 0; i < mdesc->count; ++i)
 		{
 			wdesc_t wdesc = mdesc->wdescs + i;
-			persist_clear(wdesc->addr, mdesc_ptr);
+			persist_clear(wdesc->addr.abs(), mdesc_ptr);
 		}
 	}
 
@@ -210,6 +232,7 @@ bool pmwcas_commit(mdesc_t mdesc)
 	*/
 	CAS(&mdesc->status, status | DIRTY_BIT, ST_UNDECIDED);
 	persist_clear(&mdesc->status, mdesc->status);
+	auto x = *mdesc;
 
 	/*
 	* install the final value for each word
@@ -219,16 +242,16 @@ bool pmwcas_commit(mdesc_t mdesc)
 		wdesc_t wdesc = mdesc->wdescs + i;
 		uint64_t val = 
 			(mdesc->status == ST_SUCCESS ? wdesc->new_val : wdesc->expect) | DIRTY_BIT;
-		uint64_t r = CAS(wdesc->addr, val, mdesc_ptr);
+		uint64_t r = CAS(wdesc->addr.abs(), val, mdesc_ptr);
 		
 		/*
 		* if the dirty bit has been unset
 		*/
 		if (r == (mdesc_ptr & ~DIRTY_BIT))
 		{
-			CAS(wdesc->addr, val, mdesc_ptr & ~DIRTY_BIT);
+			CAS(wdesc->addr.abs(), val, mdesc_ptr & ~DIRTY_BIT);
 		}
-		persist_clear(wdesc->addr, val);
+		persist_clear(wdesc->addr.abs(), val);
 	}
 	return mdesc->status == ST_SUCCESS;
 }
@@ -284,7 +307,7 @@ void pmwcas_recovery(mdesc_pool_t pool)
 			continue;
 		}
 		bool done = mdesc->status == ST_SUCCESS;
-		uint64_t mdesc_ptr = (uint64_t)mdesc | MwCAS_BIT | DIRTY_BIT;
+		uint64_t mdesc_ptr = mdesc.rel() | MwCAS_BIT | DIRTY_BIT;
 
 		/*
 		* each target word could remain:
@@ -299,23 +322,23 @@ void pmwcas_recovery(mdesc_pool_t pool)
 			uint64_t r, val = done ? wdesc->new_val : wdesc->expect;
 
 			/* case (3) when dirty bit set */
-			r = CAS(wdesc->addr, wdesc->expect, mdesc_ptr);
+			r = CAS(wdesc->addr.abs(), val, mdesc_ptr);
 			/* case (3) when the dirty bit unset */
 			if (r == (mdesc_ptr & ~DIRTY_BIT))
 			{
-				CAS(wdesc->addr, wdesc->new_val, mdesc_ptr & ~DIRTY_BIT);
+				CAS(wdesc->addr.abs(), val, mdesc_ptr & ~DIRTY_BIT);
 			}
 			/* case (2) */
-			if (r == ((uint64_t)wdesc | RDCSS_BIT))
+			if (r & RDCSS_BIT)
 			{
-				CAS(wdesc->addr, wdesc->expect, (uint64_t)wdesc | RDCSS_BIT);
+				CAS(wdesc->addr.abs(), wdesc->expect, wdesc.rel() | RDCSS_BIT);
 			}
 			/*
 			* if all CASs above fail,
 			* target word remain in case (1) or case (4)
 			* no need to modify
 			*/
-			persist(wdesc->addr, sizeof(*wdesc->addr));
+			persist(wdesc->addr.abs(), sizeof(*wdesc->addr));
 		}
 		/* we have persist all the target words to the correct state */
 		mdesc->status = ST_FREE;

@@ -15,7 +15,7 @@ typedef struct ebr ebr_t;
 
 ebr_t *		ebr_create(void);
 void		ebr_destroy(ebr_t *);
-int		ebr_register(ebr_t *);
+int			ebr_register(ebr_t *);
 
 void		ebr_enter(ebr_t *);
 void		ebr_exit(ebr_t *);
