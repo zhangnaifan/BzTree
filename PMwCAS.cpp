@@ -4,6 +4,9 @@
 template<typename T>
 UCHAR* rel_ptr<T>::base_address(nullptr);
 
+template<typename T>
+PMEMoid rel_ptr<T>::base_oid(OID_NULL);
+
 /* set desc status to FREE */
 void pmwcas_first_use(mdesc_pool_t pool)
 {
@@ -15,11 +18,11 @@ void pmwcas_first_use(mdesc_pool_t pool)
 }
 
 /* set base address */
-void pmwcas_init(UCHAR* base)
+void pmwcas_init(PMEMoid oid)
 {
-	rel_ptr<uint64_t>::set_base(base);
-	rel_ptr<word_entry>::set_base(base);
-	rel_ptr<pmwcas_entry>::set_base(base);
+	rel_ptr<uint64_t>::set_base(oid);
+	rel_ptr<word_entry>::set_base(oid);
+	rel_ptr<pmwcas_entry>::set_base(oid);
 }
 
 /* allocate a PMwCAS desc; return base_address if failed */

@@ -3,6 +3,7 @@
 
 #include <libpmemobj.h>
 #include <libpmem.h>
+#include "rel_ptr.h"
 #include "gc.h"
 
 #define IS_PMEM		1
@@ -32,43 +33,6 @@
 
 #define EXCHANGE		InterlockedExchange
 #define CAS				InterlockedCompareExchange
-
-/* relative pointer */
-template<typename T>
-class rel_ptr
-{
-	/* base address initialized in the start */
-	static UCHAR * base_address;
-	/* offset from the base address */
-	uint64_t off;
-public:
-	/* constructors */
-	rel_ptr() : off(0) {}
-	rel_ptr(const T * abs_ptr) : off((UCHAR*)abs_ptr - base_address) {}
-	explicit rel_ptr(uint64_t abs_ptr) : off((UCHAR*)abs_ptr - base_address) {}
-	rel_ptr(UCHAR * abs_ptr) : off(abs_ptr - base_address) {}
-	template<typename U>
-	rel_ptr(rel_ptr<U> rptr) : off((UCHAR*)rptr.abs() - base_address) {}
-	rel_ptr(PMEMoid oid) : off((UCHAR*)pmemobj_direct(oid) - base_address) {}
-
-	/* basic pointer usage */
-	T& operator *() { return *(T*)(base_address + off); }
-	T* operator ->() { return (T*)(base_address + off); }
-	
-	/* return absolute or relative address */
-	uint64_t * abs() { return (uint64_t*)(base_address + off); }
-	uint64_t rel() { return off; }
-
-	/* comparison */
-	bool operator ==(const rel_ptr<T>& rptr) { return off == rptr.off; }
-	bool operator <(const rel_ptr<T>& rptr) { return off < rptr.off; }
-	bool operator >(const rel_ptr<T>& rptr) { return off > rptr.off; }
-	
-	bool is_null() { return !off; }
-	void set_null() { off = 0; }
-	static void set_base(UCHAR* base) { base_address = base; }
-	static UCHAR* null() { return base_address; }
-};
 
 struct word_entry;
 struct pmwcas_entry;
@@ -105,7 +69,7 @@ struct pmwcas_pool
 
 void pmwcas_first_use(mdesc_pool_t pool);
 
-void pmwcas_init(UCHAR* base);
+void pmwcas_init(PMEMoid oid);
 
 void pmwcas_recovery(mdesc_pool_t pool);
 
