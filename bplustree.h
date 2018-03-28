@@ -123,7 +123,6 @@ typedef struct free_block {
 
 struct bplus_tree {
 	PMEMobjpool * pop;
-	PMEMoid start_oid;
 	uint64_t block_size;
 	uint64_t level;
 	rel_ptr<bplus_node> root;
@@ -132,9 +131,9 @@ struct bplus_tree {
 };
 
 void bplus_tree_dump(struct bplus_tree *tree);
-long bplus_tree_get(struct bplus_tree *tree, key_t key);
-int bplus_tree_put(struct bplus_tree *tree, key_t key, long data);
-long bplus_tree_get_range(struct bplus_tree *tree, key_t key1, key_t key2);
+rel_ptr<int> bplus_tree_get(struct bplus_tree *tree, key_t key);
+int bplus_tree_put(struct bplus_tree *tree, key_t key, rel_ptr<int> data);
+rel_ptr<int> bplus_tree_get_range(struct bplus_tree *tree, key_t key1, key_t key2);
 struct bplus_tree *bplus_tree_init(char *filename, int block_size);
 void bplus_tree_deinit(struct bplus_tree *tree);
 int bplus_open(char *filename);
