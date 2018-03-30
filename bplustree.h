@@ -76,7 +76,6 @@ static inline int list_empty(const struct list_head *head)
 }
 
 typedef struct bplus_node {
-	rel_ptr<bplus_node> self;
 	rel_ptr<bplus_node> parent;
 	rel_ptr<bplus_node> prev;
 	rel_ptr<bplus_node> next;
@@ -86,7 +85,6 @@ typedef struct bplus_node {
 	int children;
 	bplus_node(int t) : type(t), children(0)
 	{
-		self.set_null();
 		parent.set_null();
 		prev.set_null();
 		next.set_null();
@@ -126,8 +124,6 @@ struct bplus_tree {
 	uint64_t block_size;
 	uint64_t level;
 	rel_ptr<bplus_node> root;
-	char *caches;
-	uint64_t used[MIN_CACHE_NUM];
 };
 
 void bplus_tree_dump(struct bplus_tree *tree);
