@@ -239,17 +239,14 @@ static void node_delete(struct bplus_tree *tree, rel_ptr<bplus_node> node,
 		if (!right.is_null()) {
 			left->next = right->self;
 			right->prev = left->self;
-			node_flush(tree, right);
 		}
 		else {
 			left->next.set_null();
 		}
-		node_flush(tree, left);
 	}
 	else {
 		if (!right.is_null()) {
 			right->prev.set_null();
-			node_flush(tree, right);
 		}
 	}
 	/*
@@ -261,11 +258,11 @@ static void node_delete(struct bplus_tree *tree, rel_ptr<bplus_node> node,
 	list_add_tail(&block->link, &tree->free_blocks);
 	*/
 
-	PMEMoid oid = node->self.oid();
+	PMEMoid oid = node.oid();
 	
 	pmemobj_free(&oid);
 	/* return the node cache borrowed from */
-	cache_defer(tree, node);
+	//cache_defer(tree, node);
 }
 
 static inline void sub_node_update(struct bplus_tree *tree, rel_ptr<bplus_node> parent,
@@ -844,22 +841,22 @@ static void non_leaf_remove(struct bplus_tree *tree, rel_ptr<bplus_node> node, i
 		/* node is the root */
 		if (node->children == 2) {
 			/* replace old root with the first sub-node */
-			rel_ptr<bplus_node> root = node_fetch(tree, sub(node)[0]);
+			rel_ptr<bplus_node> root = sub(node)[0];
 			root->parent.set_null();
-			tree->root = root->self;
+			tree->root = root;
 			tree->level--;
 			node_delete(tree, node, rel_ptr<bplus_node>::null(), rel_ptr<bplus_node>::null());
-			node_flush(tree, root);
+			//node_flush(tree, root);
 		}
 		else {
 			non_leaf_simple_remove(tree, node, remove);
-			node_flush(tree, node);
+			//node_flush(tree, node);
 		}
 	}
 	else if (node->children <= (_max_order + 1) / 2) {
-		rel_ptr<bplus_node> l_sib = node_fetch(tree, node->prev);
-		rel_ptr<bplus_node> r_sib = node_fetch(tree, node->next);
-		rel_ptr<bplus_node> parent = node_fetch(tree, node->parent);
+		rel_ptr<bplus_node> l_sib = node->prev;
+		rel_ptr<bplus_node> r_sib = node->next;
+		rel_ptr<bplus_node> parent = node->parent;
 
 		int i = parent_key_index(parent, key(node)[0]);
 
@@ -867,11 +864,12 @@ static void non_leaf_remove(struct bplus_tree *tree, rel_ptr<bplus_node> node, i
 		if (sibling_select(l_sib, r_sib, parent, i) == LEFT_SIBLING) {
 			if (l_sib->children > (_max_order + 1) / 2) {
 				non_leaf_shift_from_left(tree, node, l_sib, parent, i, remove);
-				/* flush nodes */
+				/* flush nodes 
 				node_flush(tree, node);
 				node_flush(tree, l_sib);
 				node_flush(tree, r_sib);
 				node_flush(tree, parent);
+				*/
 			}
 			else {
 				non_leaf_merge_into_left(tree, node, l_sib, parent, i, remove);
@@ -887,18 +885,19 @@ static void non_leaf_remove(struct bplus_tree *tree, rel_ptr<bplus_node> node, i
 
 			if (r_sib->children > (_max_order + 1) / 2) {
 				non_leaf_shift_from_right(tree, node, r_sib, parent, i + 1);
-				/* flush nodes */
+				/* flush nodes 
 				node_flush(tree, node);
 				node_flush(tree, l_sib);
 				node_flush(tree, r_sib);
 				node_flush(tree, parent);
+				*/
 			}
 			else {
 				non_leaf_merge_from_right(tree, node, r_sib, parent, i + 1);
 				/* delete empty right sibling and flush */
 				rel_ptr<bplus_node> rr_sib = node_fetch(tree, r_sib->next);
 				node_delete(tree, r_sib, node, rr_sib);
-				node_flush(tree, l_sib);
+				//node_flush(tree, l_sib);
 				/* trace upwards */
 				non_leaf_remove(tree, parent, i + 1);
 			}
@@ -906,7 +905,7 @@ static void non_leaf_remove(struct bplus_tree *tree, rel_ptr<bplus_node> node, i
 	}
 	else {
 		non_leaf_simple_remove(tree, node, remove);
-		node_flush(tree, node);
+		//node_flush(tree, node);
 	}
 }
 
@@ -979,10 +978,6 @@ static int leaf_remove(struct bplus_tree *tree, rel_ptr<bplus_node> leaf, key_t 
 		return -1;
 	}
 
-	/* fetch from free node caches */
-	int i = ((char *)leaf.abs() - tree->caches) / _block_size;
-	tree->used[i] = 1;
-
 	if (leaf->parent.is_null()) {
 		/* leaf as the root */
 		if (leaf->children == 1) {
@@ -994,26 +989,25 @@ static int leaf_remove(struct bplus_tree *tree, rel_ptr<bplus_node> leaf, key_t 
 		}
 		else {
 			leaf_simple_remove(tree, leaf, remove);
-			node_flush(tree, leaf);
 		}
 	}
 	else if (leaf->children <= (_max_entries + 1) / 2) {
-		rel_ptr<bplus_node> l_sib = node_fetch(tree, leaf->prev);
-		rel_ptr<bplus_node> r_sib = node_fetch(tree, leaf->next);
-		auto tmp = *r_sib;
-		rel_ptr<bplus_node> parent = node_fetch(tree, leaf->parent);
+		rel_ptr<bplus_node> l_sib = leaf->prev;
+		rel_ptr<bplus_node> r_sib = leaf->next;
+		rel_ptr<bplus_node> parent = leaf->parent;
 
-		i = parent_key_index(parent, key(leaf)[0]);
+		int i = parent_key_index(parent, key(leaf)[0]);
 
 		/* decide which sibling to be borrowed from */
 		if (sibling_select(l_sib, r_sib, parent, i) == LEFT_SIBLING) {
 			if (l_sib->children > (_max_entries + 1) / 2) {
 				leaf_shift_from_left(tree, leaf, l_sib, parent, i, remove);
-				/* flush leaves */
+				/* flush leaves 
 				node_flush(tree, leaf);
 				node_flush(tree, l_sib);
 				node_flush(tree, r_sib);
 				node_flush(tree, parent);
+				*/
 			}
 			else {
 				leaf_merge_into_left(tree, leaf, l_sib, i, remove);
@@ -1029,18 +1023,19 @@ static int leaf_remove(struct bplus_tree *tree, rel_ptr<bplus_node> leaf, key_t 
 
 			if (r_sib->children > (_max_entries + 1) / 2) {
 				leaf_shift_from_right(tree, leaf, r_sib, parent, i + 1);
-				/* flush leaves */
+				/* flush leaves 
 				node_flush(tree, leaf);
 				node_flush(tree, l_sib);
 				node_flush(tree, r_sib);
 				node_flush(tree, parent);
+				*/
 			}
 			else {
 				leaf_merge_from_right(tree, leaf, r_sib);
 				/* delete empty right sibling flush */
-				rel_ptr<bplus_node> rr_sib = node_fetch(tree, r_sib->next);
+				rel_ptr<bplus_node> rr_sib = r_sib->next;
 				node_delete(tree, r_sib, leaf, rr_sib);
-				node_flush(tree, l_sib);
+				//node_flush(tree, l_sib);
 				/* trace upwards */
 				non_leaf_remove(tree, parent, i + 1);
 			}
@@ -1048,7 +1043,7 @@ static int leaf_remove(struct bplus_tree *tree, rel_ptr<bplus_node> leaf, key_t 
 	}
 	else {
 		leaf_simple_remove(tree, leaf, remove);
-		node_flush(tree, leaf);
+		//node_flush(tree, leaf);
 	}
 
 	return 0;
@@ -1059,7 +1054,6 @@ static int bplus_tree_delete(struct bplus_tree *tree, key_t key)
 	rel_ptr<bplus_node> node = tree->root;
 	while (!node.is_null()) {
 		if (is_leaf(node)) {
-			node = node_seek(tree, node);
 			return leaf_remove(tree, node, key);
 		}
 		else {
@@ -1278,7 +1272,7 @@ int main()
 	printf_s("read: %lf\n",
 		double(clock() - beg) / CLOCKS_PER_SEC);
 	//bplus_tree_dump(tree);
-	for (auto i = 5; i < 60; i += 5) {
+	for (auto i = 1; i < 60; i += 1) {
 		if (i == 15) {
 			printf_s("fu");
 		}
