@@ -15,7 +15,6 @@ public:
 	rel_ptr() : off(0) {}
 	rel_ptr(const T * abs_ptr) : off((UCHAR*)abs_ptr - base_address) {}
 	explicit rel_ptr(uint64_t abs_ptr) : off((UCHAR*)abs_ptr - base_address) {}
-	rel_ptr(UCHAR * abs_ptr) : off(abs_ptr - base_address) {}
 	template<typename U>
 	rel_ptr(rel_ptr<U> rptr) : off((UCHAR*)rptr.abs() - base_address) {}
 	rel_ptr(PMEMoid oid) : off((UCHAR*)pmemobj_direct(oid) - base_address) {}
@@ -40,7 +39,7 @@ public:
 	bool is_null() { return !off; }
 	void set_null() { off = 0; }
 	static void set_base(PMEMoid o) { base_oid = o; base_address = (UCHAR*)pmemobj_direct(o); }
-	static UCHAR* null() { return base_address; }
+	static rel_ptr<T> null() { return rel_ptr<T>(); }
 };
 
 #endif // !REL_PTR_H

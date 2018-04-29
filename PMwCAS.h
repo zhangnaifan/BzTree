@@ -81,14 +81,14 @@ void pmwcas_reclaim(gc_entry_t *entry, void *arg);
 
 bool pmwcas_add(mdesc_t mdesc, rel_ptr<uint64_t> addr, uint64_t expect, uint64_t new_val, off_t recycle);
 
-bool pmwcas_add(mdesc_t mdesc, rel_ptr<uint64_t> addr, rel_ptr<uint64_t> expect, rel_ptr<uint64_t> new_val, off_t recycle);
+//bool pmwcas_add(mdesc_t mdesc, rel_ptr<uint64_t> addr, rel_ptr<uint64_t> expect, rel_ptr<uint64_t> new_val, off_t recycle);
 
 bool pmwcas_commit(mdesc_t mdesc);
 
 uint64_t pmwcas_read(uint64_t * addr);
 
 template<typename T>
-rel_ptr<T> * pmwcas_reserve(mdesc_t mdesc, rel_ptr<uint64_t> addr, rel_ptr<uint64_t> expect, off_t recycle)
+rel_ptr<rel_ptr<T>> pmwcas_reserve(mdesc_t mdesc, rel_ptr<rel_ptr<uint64_t>> addr, rel_ptr<uint64_t> expect, off_t recycle)
 {
 	off_t insert_point = (off_t)mdesc->count, i;
 	wdesc_t wdesc = mdesc->wdescs;
@@ -124,7 +124,7 @@ rel_ptr<T> * pmwcas_reserve(mdesc_t mdesc, rel_ptr<uint64_t> addr, rel_ptr<uint6
 	mdesc->wdescs[insert_point].recycle_func = recycle;
 
 	++mdesc->count;
-	return (rel_ptr<T>*)&mdesc->wdescs[insert_point].new_val;
+	return rel_ptr<rel_ptr<T>>((rel_ptr<T>*)&mdesc->wdescs[insert_point].new_val);
 }
 
 #endif // !PMwCAS_H

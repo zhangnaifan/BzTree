@@ -91,29 +91,6 @@ typedef struct bplus_node {
 	}
 } bplus_node;
 
-/*
-struct bplus_non_leaf {
-rel_ptr<bplus_node> self;
-rel_ptr<bplus_node> parent;
-rel_ptr<bplus_node> prev;
-rel_ptr<bplus_node> next;
-int type;
-int children;
-key_t key[BPLUS_MAX_ORDER - 1];
-rel_ptr<bplus_node> sub_ptr[BPLUS_MAX_ORDER];
-};
-struct bplus_leaf {
-rel_ptr<bplus_node> self;
-rel_ptr<bplus_node> parent;
-rel_ptr<bplus_node> prev;
-rel_ptr<bplus_node> next;
-int type;
-int entries;
-key_t key[BPLUS_MAX_ENTRIES];
-long data[BPLUS_MAX_ENTRIES];
-};
-*/
-
 typedef struct free_block {
 	struct list_head link;
 	rel_ptr<bplus_node> offset;
@@ -121,6 +98,7 @@ typedef struct free_block {
 
 struct bplus_tree {
 	PMEMobjpool * pop;
+	mdesc_pool_t pool;
 	uint64_t block_size;
 	uint64_t level;
 	rel_ptr<bplus_node> root;

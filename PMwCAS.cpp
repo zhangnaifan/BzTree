@@ -70,6 +70,11 @@ void pmwcas_reclaim(gc_entry_t *entry, void *arg)
 	}
 }
 
+void pmwcas_word_recycle(rel_ptr<uint64_t> ptr_leak)
+{
+	pmemobj_free(&ptr_leak.oid());
+}
+
 /*
 * add a word entry to PMwCAS desc
 * expect and new_val must be common variables whose higher 12 bits are 0
@@ -117,11 +122,12 @@ bool pmwcas_add(mdesc_t mdesc, rel_ptr<uint64_t> addr, uint64_t expect, uint64_t
 /* 
 * add a word desc to PMwCAS desc
 * expect and new_val are rel_ptr
-*/
+
 bool pmwcas_add(mdesc_t mdesc, rel_ptr<uint64_t> addr, rel_ptr<uint64_t> expect, rel_ptr<uint64_t> new_val, off_t recycle)
 {
 	return pmwcas_add(mdesc, addr, expect.rel(), new_val.rel(), recycle);
 }
+*/
 
 inline bool is_RDCSS(uint64_t val)
 {
