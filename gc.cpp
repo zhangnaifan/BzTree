@@ -10,10 +10,6 @@
 * using the Epoch-based reclamation (EBR) mechanism.
 */
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdbool.h>
-#include <inttypes.h>
 #include <assert.h>
 #include <thread>
 
@@ -106,8 +102,6 @@ gc_limbo(gc_t *gc, void *obj)
 	do {
 		head = gc->limbo;
 		ent->next = head;
-		//} while (!atomic_compare_exchange_weak(&gc->limbo, head, ent));
-		//} while (!gc->limbo.compare_exchange_weak(head, ent));
 	} while (CAS((uint64_t*)&gc->limbo, (uint64_t)ent, (uint64_t)head) != (uint64_t)head);
 }
 
@@ -132,8 +126,6 @@ next:
 	*/
 	staging_epoch = ebr_staging_epoch(ebr);
 	assert(gc->epoch_list[staging_epoch] == NULL);
-	//gc->epoch_list[staging_epoch] = (gc_entry_t *)atomic_exchange(&gc->limbo, NULL);
-	//gc->epoch_list[staging_epoch] = gc->limbo.exchange(NULL);
 	gc->epoch_list[staging_epoch] = (gc_entry_t *)EXCHANGE((uint64_t*)&gc->limbo, NULL);
 
 

@@ -3,20 +3,15 @@
 
 #include <libpmemobj.h>
 #include <libpmem.h>
+#include "bzconfig.h"
 #include "rel_ptr.h"
 #include "gc.h"
-
-#define IS_PMEM		1
 
 #ifdef IS_PMEM
 #define persist		pmem_persist
 #else
 #define persit		pmem_msync
 #endif // IS_PMEM
-
-#define DESCRIPTOR_POOL_SIZE	256
-#define WORD_DESCRIPTOR_SIZE	4
-#define CALLBACK_SIZE			4
 
 #define RDCSS_BIT		((uint64_t)1 << 63)
 #define MwCAS_BIT		((uint64_t)1 << 62)
@@ -27,9 +22,6 @@
 #define ST_SUCCESS		1
 #define ST_FAILED		2
 #define ST_FREE			3
-
-#define VALID			0
-#define INVALID			1
 
 #define EXCHANGE		InterlockedExchange
 #define CAS				InterlockedCompareExchange
@@ -71,7 +63,7 @@ struct pmwcas_pool
 
 void pmwcas_first_use(mdesc_pool_t pool);
 
-void pmwcas_init(mdesc_pool_t pool, PMEMoid oid);
+int pmwcas_init(mdesc_pool_t pool, PMEMoid oid);
 
 void pmwcas_finish(mdesc_pool_t pool);
 

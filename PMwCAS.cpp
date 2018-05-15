@@ -1,6 +1,10 @@
 #include "PMwCAS.h"
+#include "bzconfig.h"
+#include "bzerrno.h"
 #include <thread>
 #include <atomic>
+
+std::atomic<bool> gc_alive = false;
 
 /* set desc status to FREE */
 void pmwcas_first_use(mdesc_pool_t pool)
@@ -19,7 +23,7 @@ void pmwcas_reclaim(gc_entry_t *entry, void *arg);
 * set mdesc_pool ptr
 * init gc
 */
-void pmwcas_init(mdesc_pool_t pool, PMEMoid oid)
+int pmwcas_init(mdesc_pool_t pool, PMEMoid oid)
 {
 	/* base address */
 	rel_ptr<uint64_t>::set_base(oid);
@@ -31,16 +35,25 @@ void pmwcas_init(mdesc_pool_t pool, PMEMoid oid)
 		pool->mdescs[i].mdesc_pool = pool;
 	}
 	/* init gc */
-	pool->gc = gc_create(offsetof(struct pmwcas_entry, gc_entry), pmwcas_reclaim, NULL);
-	/* TODO: 创建GC线程 */
+	if (!(pool->gc = gc_create(offsetof(struct pmwcas_entry, gc_entry), pmwcas_reclaim, NULL)))
+		return EGCCREAT;
+	/* 创建GC线程 */
+	std::thread gc([pool] {
+		gc_alive.store(true);
+		while (gc_alive.load(std::memory_order_consume)) {
+			gc_cycle(pool->gc);
+			std::this_thread::sleep_for(std::chrono::milliseconds(GC_WAIT_MS));
+		}
+	});
+	gc.detach();
 }
 
 void pmwcas_finish(mdesc_pool_t pool)
 {
+	gc_alive.store(false, std::memory_order_release);
 	gc_full(pool->gc, 50);
-	auto tmp_ptr = pool->gc;
+	gc_destroy(pool->gc);
 	pool->gc = nullptr;
-	gc_destroy(tmp_ptr);
 }
 
 /* allocate a PMwCAS desc; enter crit; return base_address if failed */

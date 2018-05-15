@@ -31,14 +31,30 @@ struct bz_node
 
 /* BzTree */
 struct bz_tree {
-	PMEMobjpool * pop;
-	mdesc_pool_t pool;
-	rel_ptr<bz_node> root;
+	PMEMobjpool *		pop;
+	pmwcas_pool			pool;
+	rel_ptr<bz_node>	root;
 };
 
-int bz_init(bz_tree * tree, PMEMobjpool * pop, mdesc_pool_t pool, PMEMoid base_oid);
+void bz_first_use(bz_tree * tree);
+
+int bz_init(bz_tree * tree, PMEMobjpool * pop, PMEMoid base_oid);
+
+void bz_finish(bz_tree * tree);
 
 int bz_alloc(bz_tree * tree, rel_ptr<rel_ptr<bz_node>> addr, size_t size);
+
+
+
+
+
+
+
+
+
+
+
+
 
 /* 位操作函数集 BEGIN */
 inline bool is_frozen(uint64_t status) {

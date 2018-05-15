@@ -33,14 +33,31 @@ POBJ_LAYOUT_BEGIN(layout_name);
 POBJ_LAYOUT_TOID(layout_name, struct bz_node);
 POBJ_LAYOUT_END(layout_name);
 
+/* 首次使用BzTree */
+void bz_first_use(bz_tree * tree)
+{
+	pmwcas_first_use(&tree->pool);
+	tree->root.set_null();
+	persist(&tree->root, 64);
+}
+
 /* 初始化BzTree */
-int bz_init(bz_tree * tree, PMEMobjpool * pop, mdesc_pool_t pool, PMEMoid base_oid)
+int bz_init(bz_tree * tree, PMEMobjpool * pop, PMEMoid base_oid)
 {
 	rel_ptr<bz_node>::set_base(base_oid);
 	rel_ptr<rel_ptr<bz_node>>::set_base(base_oid);
 	tree->pop = pop;
-	tree->pool = pool;
+	int err = 0;
+	if (err = pmwcas_init(&tree->pool, base_oid))
+		return err;
+	pmwcas_recovery(&tree->pool);
 	return 0;
+}
+
+/* 收工 */
+void bz_finish(bz_tree * tree)
+{
+	pmwcas_finish(&tree->pool);
 }
 
 int constr_bz_node(PMEMobjpool *pop, void *ptr, void *arg)
@@ -51,7 +68,7 @@ int constr_bz_node(PMEMobjpool *pop, void *ptr, void *arg)
 }
 
 int bz_alloc(bz_tree * tree, rel_ptr<rel_ptr<bz_node>> addr, size_t size) {
-	mdesc_t mdesc = pmwcas_alloc(tree->pool, 0, rand());
+	mdesc_t mdesc = pmwcas_alloc(&tree->pool, 0, rand());
 	auto ptr = pmwcas_reserve<bz_node>(mdesc, addr, *addr, 0);
 	TOID(struct bz_node) toid;
 	POBJ_ALLOC(tree->pop, &toid, struct bz_node, size, constr_bz_node, (void*)size);
