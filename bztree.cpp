@@ -1,3 +1,8 @@
+#include <stdlib.h>
+#include "bztree.h"
+#include "bzerrno.h"
+#include <iostream>
+using namespace std;
 /*
 insert:
 1) writer tests Frozen Bit, retraverse if failed
@@ -24,6 +29,55 @@ to avoid duplicate keys:
 	7.2) if Frozen bit is set, abort and retry the insert
 */
 
+POBJ_LAYOUT_BEGIN(layout_name);
+POBJ_LAYOUT_TOID(layout_name, struct bz_node);
+POBJ_LAYOUT_END(layout_name);
+
+/* 初始化BzTree */
+int bz_init(bz_tree * tree, PMEMobjpool * pop, mdesc_pool_t pool, PMEMoid base_oid)
+{
+	rel_ptr<bz_node>::set_base(base_oid);
+	rel_ptr<rel_ptr<bz_node>>::set_base(base_oid);
+	tree->pop = pop;
+	tree->pool = pool;
+	return 0;
+}
+
+int constr_bz_node(PMEMobjpool *pop, void *ptr, void *arg)
+{
+	bz_node * node = (bz_node *)ptr;
+	set_node_size(node->status_, (uint64_t)arg);
+	return 0;
+}
+
+int bz_alloc(bz_tree * tree, rel_ptr<rel_ptr<bz_node>> addr, size_t size) {
+	mdesc_t mdesc = pmwcas_alloc(tree->pool, 0, rand());
+	auto ptr = pmwcas_reserve<bz_node>(mdesc, addr, *addr, 0);
+	TOID(struct bz_node) toid;
+	POBJ_ALLOC(tree->pop, &toid, struct bz_node, size, constr_bz_node, (void*)size);
+	*ptr = toid.oid;
+	persist(ptr.abs(), sizeof(uint64_t));
+	int ret = pmwcas_commit(mdesc);
+	cout << ret << endl;
+	pmwcas_free(mdesc);
+	return ret;
+}
+
+/* 执行叶节点的数据项插入 */
+int bz_node::leaf_insert(char * key, size_t key_len, char * val, size_t val_len, uint32_t alloc_epoch) {
+	/*
+	1. 确保frozen位=0
+	2. 2-word PMwCAS预留数据项位置: record_count/block_size, offset
+	3. 拷贝数据项val, 并持久化
+	4. 读状态字s, 确保frozen位=0
+	5. 2-word PMwCAS: visiable/offset/key_len/total_len, s
+	*/
+	uint64_t status = pmwcas_read(&status_);
+	if (is_frozen(status)) {
+		return EFROZEN;
+	}
+	return 0;
+}
 /*
 delete:
 1) 2-word PMwCAS on
@@ -78,3 +132,31 @@ trigger by
 5) N is ready for gc
 6) 
 */
+
+
+uint64_t * bz_node::rec_meta_arr() {
+	return (uint64_t*)((char*)this + sizeof(*this));
+}
+
+/* K-V getter and setter */
+char * bz_node::get_key(uint64_t meta) {
+	return (char*)this + get_offset(meta);
+}
+void bz_node::set_key(uint64_t &meta, const char *src, size_t key_len) {
+	memcpy(get_key(meta), src, key_len);
+}
+char * bz_node::get_value(uint64_t meta) {
+	return (char*)this + get_offset(meta) + get_key_length(meta);
+}
+void bz_node::set_value(uint64_t &meta, const char * src, size_t value_len) {
+	memcpy(get_value(meta), src, value_len);
+}
+
+/* 键值比较函数 */
+template<typename Key>
+int bz_node::key_cmp(uint64_t meta_1, uint64_t meta_2) {
+	return *(Key*)get_key(meta_1) - *(Key*)get_key(meta_2);
+}
+int bz_node::key_cmp_str(uint64_t meta_1, uint64_t meta_2) {
+	return strcmp(get_key(meta_1), get_key(meta_2));
+}

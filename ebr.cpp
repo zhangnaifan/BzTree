@@ -27,14 +27,9 @@
 * See the comments in the ebr_sync() function for detailed explanation.
 */
 
-#include <stdlib.h>
-#include <stdbool.h>
-#include <string.h>
-#include <errno.h>
 #include <assert.h>
 #include <atomic>
-#include <pthread.h>
-
+#include "PMwCAS.h"
 #include "ebr.h"
 
 #define	ACTIVE_FLAG		(0x80000000U)
@@ -49,14 +44,15 @@ typedef struct ebr_tls {
 	struct ebr_tls *	next;
 } ebr_tls_t;
 
+thread_local ebr_tls_t * local_ebr = nullptr;
+
 struct ebr {
 	/*
 	* - There is a global epoch counter which can be 0, 1 or 2.
 	* - TLS with a list of the registered threads.
 	*/
 	unsigned		global_epoch;
-	pthread_key_t		tls_key;
-	std::atomic<ebr_tls_t *>		list;
+	ebr_tls_t *		list;
 };
 
 ebr_t *
@@ -67,17 +63,12 @@ ebr_create(void)
 	if ((ebr = (ebr_t *)calloc(1, sizeof(ebr_t))) == NULL) {
 		return NULL;
 	}
-	if (pthread_key_create(&ebr->tls_key, free) != 0) {
-		free(ebr);
-		return NULL;
-	}
 	return ebr;
 }
 
 void
 ebr_destroy(ebr_t *ebr)
 {
-	pthread_key_delete(ebr->tls_key);
 	free(ebr);
 }
 
@@ -89,23 +80,24 @@ ebr_destroy(ebr_t *ebr)
 int
 ebr_register(ebr_t *ebr)
 {
-	ebr_tls_t *t, *head;
-
-	t = (ebr_tls_t *)pthread_getspecific(ebr->tls_key);
-	if (t == NULL) {
-		if ((t = (ebr_tls_t *)malloc(sizeof(ebr_tls_t))) == NULL) {
-			return -1;
-		}
-		pthread_setspecific(ebr->tls_key, t);
+	ebr_tls_t *head;
+	if (local_ebr)
+		return 0;
+	if ((local_ebr = (ebr_tls_t *)malloc(sizeof(ebr_tls_t))) == NULL) {
+		return -1;
 	}
-	memset(t, 0, sizeof(ebr_tls_t));
-
+	//cout << "alloc addr " << hex << local_ebr << endl;
+	memset(local_ebr, 0, sizeof(ebr_tls_t));
+	uint64_t r;
 	do {
 		head = ebr->list;
-		t->next = head;
-	//} while (!atomic_compare_exchange_weak(&ebr->list, head, t));
-	} while (!ebr->list.compare_exchange_weak(head, t));
+		//cout << "ini read " << hex << ebr->list << endl;
+		local_ebr->next = head;
+		r = CAS((uint64_t*)&ebr->list, (uint64_t)local_ebr, (uint64_t)head);
+		//cout << "r CAS " << hex << r << endl;
 
+	} while (r != (uint64_t)head);
+//	cout << "final " << hex << ebr->list << endl;
 	return 0;
 }
 
@@ -115,17 +107,14 @@ ebr_register(ebr_t *ebr)
 void
 ebr_enter(ebr_t *ebr)
 {
-	ebr_tls_t *t;
-
-	t = (ebr_tls_t *)pthread_getspecific(ebr->tls_key);
-	assert(t != NULL);
+	assert(local_ebr);
 
 	/*
 	* Set the "active" flag and set the local epoch to global
 	* epoch (i.e. observe the global epoch).  Ensure that the
 	* epoch is observed before any loads in the critical path.
 	*/
-	t->local_epoch = ebr->global_epoch | ACTIVE_FLAG;
+	local_ebr->local_epoch = ebr->global_epoch | ACTIVE_FLAG;
 	std::atomic_thread_fence(std::memory_order_seq_cst);
 }
 
@@ -137,7 +126,7 @@ ebr_exit(ebr_t *ebr)
 {
 	ebr_tls_t *t;
 
-	t = (ebr_tls_t *)pthread_getspecific(ebr->tls_key);
+	t = local_ebr;
 	assert(t != NULL);
 
 	/*

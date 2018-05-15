@@ -79,7 +79,7 @@ typedef struct bplus_node {
 	rel_ptr<bplus_node> parent;
 	rel_ptr<bplus_node> prev;
 	rel_ptr<bplus_node> next;
-	int type;
+	uint64_t type;
 	/* If leaf node, it specifies  count of entries,
 	* if non-leaf node, it specifies count of children(branches) */
 	int children;

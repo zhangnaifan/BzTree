@@ -31,14 +31,10 @@ enum {
 #define data(node) ((rel_ptr<int> *)(offset_ptr(node) + _max_entries * sizeof(key_t)))
 #define sub(node) ((rel_ptr<bplus_node> *)(offset_ptr(node) + (_max_order - 1) * sizeof(key_t)))
 
-static int _block_size;
-static int _max_entries;
-static int _max_order;
+static uint64_t _block_size;
+static uint64_t _max_entries;
+static uint64_t _max_order;
 static gc_t * gc;
-
-UCHAR* rel_ptr<bplus_node>::base_address;
-UCHAR* rel_ptr<int>::base_address;
-PMEMoid rel_ptr<bplus_node>::base_oid;
 
 struct layout_root {
 	uint64_t padding;
@@ -93,7 +89,7 @@ int mem, alo;
 int constr_bplus_node(PMEMobjpool *pop, void *ptr, void *arg)
 {
 	bplus_node * node = (bplus_node *)ptr;
-	node->type = (int)arg;
+	node->type = (uint64_t)arg;
 	node->children = 0;
 	node->next.set_null();
 	node->parent.set_null();
@@ -102,7 +98,7 @@ int constr_bplus_node(PMEMobjpool *pop, void *ptr, void *arg)
 	return 0;
 }
 
-rel_ptr<bplus_node> malloc_node(bplus_tree * tree, int type)
+rel_ptr<bplus_node> malloc_node(bplus_tree * tree, uint64_t type)
 {
 	/* assign new offset to the new node
 	if (list_empty(&tree->free_blocks)) {
@@ -993,7 +989,7 @@ struct bplus_tree * bplus_tree_init()
 	struct layout_root * root = (layout_root *)pmemobj_direct(oid_root);
 	
 	assert(pop && root);
-	pmwcas_init(oid_root);
+	pmwcas_init(&root->pool, oid_root);
 	pmwcas_recovery(&root->pool);
 
 	//gc = gc_create(offsetof(pmwcas_entry, gc_entry), pmwcas_reclaim, gc);
@@ -1001,7 +997,7 @@ struct bplus_tree * bplus_tree_init()
 	struct bplus_tree * tree = &root->tree;
 
 	rel_ptr<bplus_node>::set_base(oid_root);
-	pmwcas_init(oid_root);
+	pmwcas_init(&root->pool, oid_root);
 	tree->pop = pop;
 
 	_block_size = tree->block_size;
@@ -1011,7 +1007,7 @@ struct bplus_tree * bplus_tree_init()
 	return tree;
 }
 
-int main()
+int _main()
 {
 	first_use(128);
 	auto tree = bplus_tree_init();
@@ -1024,9 +1020,9 @@ int main()
 	}
 	bplus_tree_dump(tree);
 	system("pause");
-	printf_s("write: %lf\nmem: %lf\nalloc: %lf\n",
+	/*printf_s("write: %lf\nmem: %lf\nalloc: %lf\n",
 		double(clock() - beg) / CLOCKS_PER_SEC,
-		(double)alo / CLOCKS_PER_SEC);
+		(double)alo / CLOCKS_PER_SEC);*/
 
 	beg = clock();
 	for (auto i = 1; i < 60; ++i) {

@@ -1,11 +1,6 @@
-#include "spin_latch.h"
 #include "PMwCAS.h"
-
-template<typename T>
-UCHAR* rel_ptr<T>::base_address(nullptr);
-
-template<typename T>
-PMEMoid rel_ptr<T>::base_oid(OID_NULL);
+#include <thread>
+#include <atomic>
 
 /* set desc status to FREE */
 void pmwcas_first_use(mdesc_pool_t pool)
@@ -17,17 +12,44 @@ void pmwcas_first_use(mdesc_pool_t pool)
 	}
 }
 
-/* set base address */
-void pmwcas_init(PMEMoid oid)
+void pmwcas_reclaim(gc_entry_t *entry, void *arg);
+
+/* 
+* set base address 
+* set mdesc_pool ptr
+* init gc
+*/
+void pmwcas_init(mdesc_pool_t pool, PMEMoid oid)
 {
+	/* base address */
 	rel_ptr<uint64_t>::set_base(oid);
 	rel_ptr<word_entry>::set_base(oid);
 	rel_ptr<pmwcas_entry>::set_base(oid);
+	/* mdesc_pool */
+	for (off_t i = 0; i < DESCRIPTOR_POOL_SIZE; ++i)
+	{
+		pool->mdescs[i].mdesc_pool = pool;
+	}
+	/* init gc */
+	pool->gc = gc_create(offsetof(struct pmwcas_entry, gc_entry), pmwcas_reclaim, NULL);
+	/* TODO: 创建GC线程 */
 }
 
-/* allocate a PMwCAS desc; return base_address if failed */
-mdesc_t pmwcas_alloc(mdesc_pool_t pool, off_t search_pos) 
+void pmwcas_finish(mdesc_pool_t pool)
 {
+	gc_full(pool->gc, 50);
+	auto tmp_ptr = pool->gc;
+	pool->gc = nullptr;
+	gc_destroy(tmp_ptr);
+}
+
+/* allocate a PMwCAS desc; enter crit; return base_address if failed */
+mdesc_t pmwcas_alloc(mdesc_pool_t pool, off_t recycle_policy = 0, off_t search_pos = 0) 
+{
+	if (recycle_policy > 2)
+	{
+		return mdesc_t::null();
+	}
 	for (off_t i = 0; i < DESCRIPTOR_POOL_SIZE; ++i)
 	{
 		off_t pos = (i + search_pos) % DESCRIPTOR_POOL_SIZE;
@@ -38,6 +60,11 @@ mdesc_t pmwcas_alloc(mdesc_pool_t pool, off_t search_pos)
 			{
 				pool->mdescs[pos].count = 0;
 				persist((uint64_t*)&pool->mdescs[pos].count, sizeof(uint64_t));
+				pool->mdescs[pos].callback = recycle_policy;
+				persist((uint64_t*)&pool->mdescs[pos].callback, sizeof(uint64_t));
+				//GC初始化
+				gc_register(pool->gc);
+				gc_crit_enter(pool->gc);
 				return &pool->mdescs[pos];
 			}
 		}
@@ -45,31 +72,51 @@ mdesc_t pmwcas_alloc(mdesc_pool_t pool, off_t search_pos)
 	return mdesc_t::null();
 }
 
-/* add PMwCAS entry to gc list */
-void pmwcas_free(mdesc_t mdesc, gc_t * gc) 
+/* exit crit; add PMwCAS entry to gc list */
+void pmwcas_free(mdesc_t mdesc) 
 {
-	gc_limbo(gc, mdesc.abs());
+	gc_crit_exit(mdesc->mdesc_pool->gc);
+	gc_limbo(mdesc->mdesc_pool->gc, mdesc.abs());
 }
 
-/* reset desc status to FREE */
+void pmwcas_word_recycle(rel_ptr<uint64_t> ptr_leak);
+
+/* reset desc status to FREE; reclaim memory accoding to policy */
 void pmwcas_reclaim(gc_entry_t *entry, void *arg)
 {
 	gc_t *gc = (gc_t *)arg;
 	const off_t off = gc->entry_off;
-	uint64_t *status_addr;
+	mdesc_t mdesc;
 
 	while (entry) {
-		status_addr = (uint64_t *)((uintptr_t)entry - off);
+		mdesc = (mdesc_t)(pmwcas_entry*)((UCHAR*)entry - off);
 		entry = entry->next;
 		
-		/*
-		* no race condition here
-		*/
-		*status_addr = ST_FREE;
-		persist(status_addr, sizeof(*status_addr));
+		for (off_t j = 0; j < mdesc->count; ++j)
+		{
+			wdesc_t wdesc = mdesc->wdescs + j;
+			bool done = mdesc->status == ST_SUCCESS;
+			uint64_t val = done ? wdesc->new_val : wdesc->expect;
+
+			/* 根据回收规则回收 */
+			if (wdesc->recycle_func == 1) {
+				/* 未成功时回收new */
+				if (!done && wdesc->new_val) {
+					pmwcas_word_recycle(rel_ptr<uint64_t>(wdesc->new_val));
+				}
+			}
+			else if (wdesc->recycle_func == 2 && done && wdesc->expect) {
+				/* 成功时回收expect */
+				pmwcas_word_recycle(rel_ptr<uint64_t>(wdesc->expect));
+			}
+		}
+		/* we have persist all the target words to the correct state */
+		mdesc->status = ST_FREE;
+		persist(&mdesc->status, sizeof(mdesc->status));
 	}
 }
 
+/* 回收内存 */
 void pmwcas_word_recycle(rel_ptr<uint64_t> ptr_leak)
 {
 	pmemobj_free(&ptr_leak.oid());
@@ -79,7 +126,7 @@ void pmwcas_word_recycle(rel_ptr<uint64_t> ptr_leak)
 * add a word entry to PMwCAS desc
 * expect and new_val must be common variables whose higher 12 bits are 0
 */
-bool pmwcas_add(mdesc_t mdesc, rel_ptr<uint64_t> addr, uint64_t expect, uint64_t new_val, off_t recycle) 
+bool pmwcas_add(mdesc_t mdesc, rel_ptr<uint64_t> addr, uint64_t expect, uint64_t new_val, off_t recycle = 0) 
 {
 	off_t insert_point = (off_t)mdesc->count, i;
 	wdesc_t wdesc = mdesc->wdescs;
@@ -113,7 +160,7 @@ bool pmwcas_add(mdesc_t mdesc, rel_ptr<uint64_t> addr, uint64_t expect, uint64_t
 	mdesc->wdescs[insert_point].expect = expect;
 	mdesc->wdescs[insert_point].new_val = new_val;
 	mdesc->wdescs[insert_point].mdesc = mdesc;
-	mdesc->wdescs[insert_point].recycle_func = recycle;
+	mdesc->wdescs[insert_point].recycle_func = !recycle ? mdesc->callback : recycle;
 
 	++mdesc->count;
 	return true;
@@ -348,6 +395,18 @@ void pmwcas_recovery(mdesc_pool_t pool)
 			* no need to modify
 			*/
 			persist(wdesc->addr.abs(), sizeof(*wdesc->addr));
+
+			/* 根据回收规则回收 */
+			if (wdesc->recycle_func == 1) {
+				/* 未成功时回收new */
+				if (!done && wdesc->new_val) {
+					pmwcas_word_recycle(rel_ptr<uint64_t>(wdesc->new_val));
+				}
+			}
+			else if (wdesc->recycle_func == 2 && done && wdesc->expect) {
+				/* 成功时回收expect */
+				pmwcas_word_recycle(rel_ptr<uint64_t>(wdesc->expect));
+			}
 		}
 		/* we have persist all the target words to the correct state */
 		mdesc->status = ST_FREE;
