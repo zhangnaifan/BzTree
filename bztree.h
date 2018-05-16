@@ -1,11 +1,13 @@
 #ifndef BZTREE_H
 #define BZTREE_H
-#include <libpmemobj.h>
 #include "PMwCAS.h"
-#include "rel_ptr.h"
 using namespace std;
 
+template<typename Key, typename Val>
+struct bz_tree;
+
 /* BzTree节点头部 */
+template<typename Key, typename Val>
 struct bz_node
 {
 	/* 3: PMwCAS control, 1: frozen, 16: record count, 22: block size, 22: delete size */
@@ -17,36 +19,29 @@ struct bz_node
 	
 	uint64_t * rec_meta_arr();
 	/* K-V getter and setter */
-	char * get_key(uint64_t meta);
-	void set_key(uint64_t &meta, const char *src, size_t key_len);
-	char * get_value(uint64_t meta);
-	void set_value(uint64_t &meta, const char * src, size_t value_len);
+	Key * get_key(uint64_t meta);
+	void set_key(uint32_t offset, const Key * key);
+	Val * get_value(uint64_t meta);
+	void set_value(uint32_t offset, const Val * val);
 	/* 键值比较函数 */
-	template<typename Key>
-	int key_cmp(uint64_t meta_1, uint64_t meta_2);
-	int key_cmp_str(uint64_t meta_1, uint64_t meta_2);
+	int key_cmp(uint64_t meta_1, const Key * key);
 	/* 执行叶节点的数据项插入 */
-	int leaf_insert(char * key, size_t key_len, char * val, size_t val_len, uint32_t alloc_epoch);
+	int insert(bz_tree<Key, Val> * tree, Key * key, Val * val, uint32_t key_size, uint32_t total_size, uint32_t alloc_epoch);
+	int binary_search(uint64_t * meta_arr, int size, const Key * key);
 };
 
 /* BzTree */
+template<typename Key, typename Val>
 struct bz_tree {
-	PMEMobjpool *		pop;
-	pmwcas_pool			pool;
-	rel_ptr<bz_node>	root;
+	PMEMobjpool *		pop_;
+	pmwcas_pool			pool_;
+	rel_ptr<bz_node<Key, Val>>	root_;
+	
+	void first_use();
+	int init(PMEMobjpool * pop, PMEMoid base_oid);
+	void finish();
+	int alloc_node(rel_ptr<rel_ptr<bz_node<Key, Val>>> addr, rel_ptr<bz_node<Key, Val>> expect, size_t size);
 };
-
-void bz_first_use(bz_tree * tree);
-
-int bz_init(bz_tree * tree, PMEMobjpool * pop, PMEMoid base_oid);
-
-void bz_finish(bz_tree * tree);
-
-int bz_alloc(bz_tree * tree, rel_ptr<rel_ptr<bz_node>> addr, size_t size);
-
-
-
-
 
 
 
@@ -94,13 +89,13 @@ inline void set_sorted_count(uint64_t &s, uint32_t new_sorted_count) {
 	s = (s & 0xffffffff00000000) | new_sorted_count;
 }
 inline bool is_visiable(uint64_t meta) {
-	return 1 & (meta >> 60);
+	return !(1 & (meta >> 60));
 }
 inline void set_visiable(uint64_t &meta) {
-	meta |= ((uint64_t)1 << 60);
+	meta &= 0xefffffffffffffff;
 }
 inline void unset_visiable(uint64_t &meta) {
-	meta &= 0xefffffffffffffff;
+	meta |= ((uint64_t)1 << 60);
 }
 inline uint32_t get_offset(uint64_t meta) {
 	return 0xfffffff & (meta >> 32);
@@ -111,7 +106,7 @@ inline void set_offset(uint64_t &meta, uint64_t new_offset) {
 inline uint16_t get_key_length(uint64_t meta) {
 	return 0xffff & (meta >> 16);
 }
-inline void set_key_length(uint64_t meta, uint32_t new_key_length) {
+inline void set_key_length(uint64_t &meta, uint32_t new_key_length) {
 	meta = (meta & 0xffffffff0000ffff) | (new_key_length << 16);
 }
 inline uint32_t get_total_length(uint64_t meta) {

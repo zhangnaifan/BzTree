@@ -3,8 +3,7 @@
 using namespace std;
 
 int main() {
-	//pmem_test().run();
-	pmwcas_test().run();
+	pmem_test().run();
 	system("pause");
 	return 0;
 }

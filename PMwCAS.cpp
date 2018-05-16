@@ -46,6 +46,7 @@ int pmwcas_init(mdesc_pool_t pool, PMEMoid oid)
 		}
 	});
 	gc.detach();
+	return 0;
 }
 
 void pmwcas_finish(mdesc_pool_t pool)
@@ -57,7 +58,7 @@ void pmwcas_finish(mdesc_pool_t pool)
 }
 
 /* allocate a PMwCAS desc; enter crit; return base_address if failed */
-mdesc_t pmwcas_alloc(mdesc_pool_t pool, off_t recycle_policy = 0, off_t search_pos = 0) 
+mdesc_t pmwcas_alloc(mdesc_pool_t pool, off_t recycle_policy, off_t search_pos) 
 {
 	if (recycle_policy > 2)
 	{
@@ -139,7 +140,7 @@ void pmwcas_word_recycle(rel_ptr<uint64_t> ptr_leak)
 * add a word entry to PMwCAS desc
 * expect and new_val must be common variables whose higher 12 bits are 0
 */
-bool pmwcas_add(mdesc_t mdesc, rel_ptr<uint64_t> addr, uint64_t expect, uint64_t new_val, off_t recycle = 0) 
+bool pmwcas_add(mdesc_t mdesc, rel_ptr<uint64_t> addr, uint64_t expect, uint64_t new_val, off_t recycle) 
 {
 	off_t insert_point = (off_t)mdesc->count, i;
 	wdesc_t wdesc = mdesc->wdescs;

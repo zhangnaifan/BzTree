@@ -23,6 +23,9 @@
 #define ST_FAILED		2
 #define ST_FREE			3
 
+#define RELEASE_NEW_ON_FAILED	1
+#define RELEASE_EXP_ON_SUCCESS	2
+
 #define EXCHANGE		InterlockedExchange
 #define CAS				InterlockedCompareExchange
 
@@ -61,24 +64,66 @@ struct pmwcas_pool
 	pmwcas_entry	mdescs[DESCRIPTOR_POOL_SIZE];
 };
 
+/* 
+* 第一次使用pmwcas时调用
+* 初始化描述符状态
+*/
 void pmwcas_first_use(mdesc_pool_t pool);
 
+/*
+* 每次重启时首先调用
+* 设置相对指针的基地址
+* 创建G/C和回收线程
+*/
 int pmwcas_init(mdesc_pool_t pool, PMEMoid oid);
 
+/*
+* 结束时调用
+* GC
+* 销毁G/C
+*/
 void pmwcas_finish(mdesc_pool_t pool);
 
+/*
+* 每次重启时调用
+* 修复描述符状态
+* 完成或回滚上次未完成的PMwCAS
+* 回收可能泄漏的内存区域
+*/
 void pmwcas_recovery(mdesc_pool_t pool);
 
-mdesc_t pmwcas_alloc(mdesc_pool_t pool, off_t recycle_policy, off_t search_pos);
+/*
+* 每次执行PMwCAS之前调用
+* 确保描述符内目标地址互不相同
+* 返回PMwCAS描述符的相对指针
+* 失败时返回空的相对指针
+*/
+mdesc_t pmwcas_alloc(mdesc_pool_t pool, off_t recycle_policy = 0, off_t search_pos = 0);
 
+/*
+* 每次执行完PMwCAS之后调用
+* 回收对应的PMwCAS描述符
+*/
 void pmwcas_free(mdesc_t mdesc);
 
-bool pmwcas_add(mdesc_t mdesc, rel_ptr<uint64_t> addr, uint64_t expect, uint64_t new_val, off_t recycle);
+/*
+* 向PMwCAS描述符添加一个CAS字段
+* 返回成功/失败
+*/
+bool pmwcas_add(mdesc_t mdesc, rel_ptr<uint64_t> addr, uint64_t expect, uint64_t new_val, off_t recycle = 0);
 
+/* 执行PMwCAS */
 bool pmwcas_commit(mdesc_t mdesc);
 
+/* 读取可能被PMwCAS操作的字的值 */
 uint64_t pmwcas_read(uint64_t * addr);
 
+/*
+* 向PMwCAS描述符添加一个CAS字段
+* 但是new_val域留空，用于填写后续分配新内存的地址
+* recycle字段用于指定某些条件下的NVM内存回收
+* 包括0：无，1：失败时回收new_val，2：成功时回收expect
+*/
 /*
 在普通内存环境中实现
 parent->child[0] = new node();
@@ -93,12 +138,6 @@ parent->child[0] = new node();
 解决方案:
 1) 使用pmdk提供的原子内存分配器
 2) 使用pmwcas持久化指针数据
-例程:
-//首先告知pmwcas我们想要修改parent->node[0]
-//pmwcas返回cas新值的地址，以便存储后续申请内存的地址
-tmp_ptr = pmwcas_reserve(..., &parent->node[0], ...)
-//原子性的内存分配器，如果成功则tmp_ptr包含新内存的地址，否则包含空地址
-POBJ_ALLOC(..., tmp_ptr, ...)
 */
 template<typename T>
 rel_ptr<rel_ptr<T>> pmwcas_reserve(mdesc_t mdesc, rel_ptr<rel_ptr<T>> addr, rel_ptr<T> expect, off_t recycle = 0)

@@ -3,13 +3,7 @@
 */
 
 #include <stdio.h>
-#include <stdlib.h>
 #include <assert.h>
-#include <string.h>
-#include <fcntl.h>
-#include <ctype.h>
-#include <sys/types.h>
-#include <sys/stat.h>
 
 #include "PMwCAS.h"
 #include "bplustree.h"
