@@ -26,9 +26,16 @@ struct bz_node
 	int key_cmp(uint64_t meta_1, const Key * key);
 	/* 二分查找 */
 	int binary_search(uint64_t * meta_arr, int size, const Key * key);
-	/* 精简版pmwcas */
-	bool pack_pmwcas(mdesc_pool_t pool, std::vector<std::tuple<rel_ptr<uint64_t>, uint64_t, uint64_t>> &casn);
-
+	/* 辅助函数 */
+	bool pack_pmwcas(mdesc_pool_t pool, std::vector<std::tuple<rel_ptr<uint64_t>, uint64_t, uint64_t>> casn);
+	bool find_key_sorted(const Key * key, uint32_t &pos);
+	bool find_key_unsorted(const Key * key, uint32_t rec_cnt, uint32_t alloc_epoch, uint32_t &pos, bool &retry);
+	uint64_t status_add_rec_blk(uint64_t status_rd, uint32_t total_size);
+	uint64_t meta_vis_off(uint64_t meta_rd, bool set_vis, uint32_t new_offset);
+	void copy_data(uint32_t new_offset, const Key * key, const Val * val, uint32_t key_size, uint32_t total_size);
+	int rescan_unsorted(uint32_t rec_cnt, const Key * key, uint32_t total_size, uint32_t alloc_epoch);
+	uint64_t meta_vis_off_klen_tlen(uint64_t meta_rd, bool set_vis, uint32_t new_offset, uint32_t key_size, uint32_t total_size);
+	uint64_t status_del(uint64_t meta_rd, uint64_t status_rd);
 	/* 执行叶节点的数据项操作 */
 	int insert(bz_tree<Key, Val> * tree, const Key * key, const Val * val, uint32_t key_size, uint32_t total_size, uint32_t alloc_epoch);
 	int remove(bz_tree<Key, Val> * tree, const Key * key);

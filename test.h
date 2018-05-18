@@ -13,12 +13,13 @@ using namespace std;
 struct pmem_test {
 	struct pmem_layout
 	{
-		bz_tree<int, int> tree;
+		bz_tree<int, rel_ptr<int>> tree;
+		int data[512];
 	};
-	void pmem_worker(pmem_test::pmem_layout * top_obj, int *k, int *v, int extra, bool write, bool dele) {
+	void pmem_worker(pmem_test::pmem_layout * top_obj, int *k, rel_ptr<int> *v, int extra, bool write, bool dele) {
 		for (int i = 0; i < extra; ++i) {
 			if (write) {
-				int ret = top_obj->tree.root_->insert(&top_obj->tree, k + i, v + i, 4, 8, 1);
+				int ret = top_obj->tree.root_->insert(&top_obj->tree, k + i, v + i, 4, 12, 1);
 				assert(!ret || ret == EUNIKEY);
 			}
 			if (dele) {
@@ -38,7 +39,7 @@ struct pmem_test {
 			cout << setfill('0') << setw(16) << hex << meta_arr[i];
 			if (is_visiable(meta_arr[i]))
 				cout << dec << " : " << *root.get_key(meta_arr[i]) 
-				<< ", " << *root.get_value(meta_arr[i]) << endl;
+				<< ", " << **root.get_value(meta_arr[i]) << endl;
 			else
 				cout << " : NO RECORD" << endl;
 		}
@@ -46,7 +47,7 @@ struct pmem_test {
 	void run(
 		bool first = true, 
 		bool write = true, 
-		bool dele = true,
+		bool dele = false,
 		int node_sz = 600 * 16, 
 		int sz = 24
 	) {
@@ -66,33 +67,41 @@ struct pmem_test {
 		auto top_obj = (pmem_layout *)pmemobj_direct(top_oid);
 		assert(!OID_IS_NULL(top_oid) && top_obj);
 		auto &tree = top_obj->tree;
+		rel_ptr<int>::set_base(top_oid);
 		if (first) {
 			tree.first_use();
+			for (int i = 0; i < 512; ++i)
+				top_obj->data[i] = 10 * i;
 		}
 		tree.init(pop, top_oid);
 		if (first) {
 			int ret = tree.alloc_node(&tree.root_, tree.root_, node_sz);
 			assert(!ret && !tree.root_.is_null() && node_sz == get_node_size(tree.root_->length_));
 		}
-		else
-		{
-			show_mem(top_obj, 24);
-		}
 
-		int keys[512], vals[512];
+		int keys[512];
+		rel_ptr<int> vals[512];
 		for (int i = 0; i < 512; ++i) {
 			keys[i] = i;
-			vals[i] = i * 10;
+			vals[i] = &top_obj->data[i];
 		}
 		thread t[512];
 		int extra = 8;
+		int empty_run = 16;
+		for (int i = sz; i < sz + empty_run; ++i)
+		{
+			t[i] = thread([] {
+				for (int i = 0; i < 1e5; ++i);
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			});
+		}
 		for (int i = 0; i < sz; ++i) {
-			t[i] = thread(&pmem_test::pmem_worker, 
-				this, top_obj, &keys[i], &vals[i], 
+			t[i] = thread(&pmem_test::pmem_worker,
+				this, top_obj, &keys[i], &vals[i],
 				sz - i > extra ? extra : sz - i,
 				write, dele);
 		}
-		for (int i = 0; i < sz; ++i) {
+		for (int i = 0; i < sz + empty_run; ++i) {
 			t[i].join();
 		}
 
@@ -101,14 +110,13 @@ struct pmem_test {
 		int rec_cnt = get_record_count(root->status_);
 		int blk_sz = get_block_size(root->status_);
 		int del_sz = get_delete_size(root->status_);
-		assert(rec_cnt * 8 == blk_sz);
+		assert(rec_cnt * 12 == blk_sz);
 		int real_cnt = 0;
 		for (int i = 0; i < rec_cnt; ++i)
 			if (is_visiable(meta_arr[i]))
 				++real_cnt;
-
-		show_mem(top_obj, 24);
-
+		assert((rec_cnt - real_cnt) * 12 == del_sz);
+		show_mem(top_obj, rec_cnt);
 		tree.finish();
 		pmemobj_close(pop);
 	}
