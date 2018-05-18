@@ -2,6 +2,7 @@
 #define TEST_H
 #include <assert.h>
 #include <iostream>
+#include<iomanip>
 #include <thread>
 #include <vector>
 #include "bztree.h"
@@ -14,13 +15,41 @@ struct pmem_test {
 	{
 		bz_tree<int, int> tree;
 	};
-	void pmem_worker(pmem_test::pmem_layout * top_obj, int *k, int *v) {
-		for (int i = 0; i < 8; ++i) {
-			int ret = top_obj->tree.root_->insert(&top_obj->tree, k, v + 10, 4, 8, 1);
+	void pmem_worker(pmem_test::pmem_layout * top_obj, int *k, int *v, int extra, bool write, bool dele) {
+		for (int i = 0; i < extra; ++i) {
+			if (write) {
+				int ret = top_obj->tree.root_->insert(&top_obj->tree, k + i, v + i, 4, 8, 1);
+				assert(!ret || ret == EUNIKEY);
+			}
+			if (dele) {
+				int ret = top_obj->tree.root_->remove(&top_obj->tree, k + i);
+				assert(!ret || ret == ENOTFOUND);
+			}
 		}
 	}
-	void run(bool first = false, int node_sz = 600 * 16)
+	void show_mem(pmem_layout * top_obj, int sz)
 	{
+		auto &root = *top_obj->tree.root_;
+		uint64_t * meta_arr = root.rec_meta_arr();
+		int rec_cnt = get_record_count(root.status_);
+		cout << setfill('0') << setw(16) << hex << root.status_ << endl;
+		cout << setfill('0') << setw(16) << hex << root.length_ << endl;
+		for (int i = 0; i < rec_cnt; ++i) {
+			cout << setfill('0') << setw(16) << hex << meta_arr[i];
+			if (is_visiable(meta_arr[i]))
+				cout << dec << " : " << *root.get_key(meta_arr[i]) 
+				<< ", " << *root.get_value(meta_arr[i]) << endl;
+			else
+				cout << " : NO RECORD" << endl;
+		}
+	}
+	void run(
+		bool first = true, 
+		bool write = true, 
+		bool dele = true,
+		int node_sz = 600 * 16, 
+		int sz = 24
+	) {
 		const char * fname = "test.pool";
 		PMEMobjpool * pop;
 		if (first) {
@@ -43,9 +72,11 @@ struct pmem_test {
 		tree.init(pop, top_oid);
 		if (first) {
 			int ret = tree.alloc_node(&tree.root_, tree.root_, node_sz);
-			//cout << ret << endl;
 			assert(!ret && !tree.root_.is_null() && node_sz == get_node_size(tree.root_->length_));
-			//cout << get_node_size(tree.root_->length_) << endl;
+		}
+		else
+		{
+			show_mem(top_obj, 24);
 		}
 
 		int keys[512], vals[512];
@@ -54,25 +85,30 @@ struct pmem_test {
 			vals[i] = i * 10;
 		}
 		thread t[512];
-
-		int ret = 0, sz = 16;
+		int extra = 8;
 		for (int i = 0; i < sz; ++i) {
-			t[i] = thread(&pmem_test::pmem_worker, this, top_obj, &keys[i], &vals[i]);
+			t[i] = thread(&pmem_test::pmem_worker, 
+				this, top_obj, &keys[i], &vals[i], 
+				sz - i > extra ? extra : sz - i,
+				write, dele);
 		}
 		for (int i = 0; i < sz; ++i) {
 			t[i].join();
 		}
 
 		auto root = &*tree.root_;
+		uint64_t * meta_arr = root->rec_meta_arr();
 		int rec_cnt = get_record_count(root->status_);
 		int blk_sz = get_block_size(root->status_);
-		assert(rec_cnt == sz && blk_sz == 8 * sz);
+		int del_sz = get_delete_size(root->status_);
+		assert(rec_cnt * 8 == blk_sz);
+		int real_cnt = 0;
+		for (int i = 0; i < rec_cnt; ++i)
+			if (is_visiable(meta_arr[i]))
+				++real_cnt;
 
-		for (int i = 0; i < sz; ++i) {
-			int k = *tree.root_->get_key(root->rec_meta_arr()[i]);
-			int v = *tree.root_->get_value(root->rec_meta_arr()[i]);
-			cout << k << " : " << v << endl;
-		}
+		show_mem(top_obj, 24);
+
 		tree.finish();
 		pmemobj_close(pop);
 	}

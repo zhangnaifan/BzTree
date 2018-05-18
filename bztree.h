@@ -16,7 +16,6 @@ struct bz_node
 	uint64_t length_;
 	/* record meta entry */
 	/* 3: PMwCAS control, 1: visiable, 28: offset, 16: key length, 16: total length */
-	
 	uint64_t * rec_meta_arr();
 	/* K-V getter and setter */
 	Key * get_key(uint64_t meta);
@@ -25,9 +24,14 @@ struct bz_node
 	void set_value(uint32_t offset, const Val * val);
 	/* 键值比较函数 */
 	int key_cmp(uint64_t meta_1, const Key * key);
-	/* 执行叶节点的数据项插入 */
-	int insert(bz_tree<Key, Val> * tree, Key * key, Val * val, uint32_t key_size, uint32_t total_size, uint32_t alloc_epoch);
+	/* 二分查找 */
 	int binary_search(uint64_t * meta_arr, int size, const Key * key);
+	/* 精简版pmwcas */
+	bool pack_pmwcas(mdesc_pool_t pool, std::vector<std::tuple<rel_ptr<uint64_t>, uint64_t, uint64_t>> &casn);
+
+	/* 执行叶节点的数据项操作 */
+	int insert(bz_tree<Key, Val> * tree, const Key * key, const Val * val, uint32_t key_size, uint32_t total_size, uint32_t alloc_epoch);
+	int remove(bz_tree<Key, Val> * tree, const Key * key);
 };
 
 /* BzTree */

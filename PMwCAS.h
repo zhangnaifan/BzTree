@@ -16,7 +16,7 @@
 #define RDCSS_BIT		((uint64_t)1 << 63)
 #define MwCAS_BIT		((uint64_t)1 << 62)
 #define DIRTY_BIT		((uint64_t)1 << 61)
-#define ADDR_MASK		(((uint64_t)1 << 48) - 1)
+#define ADDR_MASK		0xffffffffffff
 
 #define ST_UNDECIDED	0
 #define ST_SUCCESS		1

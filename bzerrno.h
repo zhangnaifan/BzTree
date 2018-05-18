@@ -6,4 +6,5 @@ const int EPMWCASALLOC = 3;
 const int EPMWCASFAIL = 4;
 const int EUNIKEY = 5;
 const int EALLOCSIZE = 6;
+const int ENOTFOUND = 7;
 #endif // !BZERRORNO_H

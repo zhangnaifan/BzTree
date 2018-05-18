@@ -4,6 +4,8 @@
 #include <thread>
 #include <atomic>
 
+#include <assert.h>
+
 std::atomic<bool> gc_alive = false;
 
 /* set desc status to FREE */
@@ -223,7 +225,7 @@ inline uint64_t install_mdesc(wdesc_t wdesc)
 {
 	uint64_t ptr = wdesc.rel() | RDCSS_BIT;
 	uint64_t r;
-	do 
+	while (true)
 	{
 		r = CAS(wdesc->addr.abs(), ptr, wdesc->expect);
 		if (is_RDCSS(r))
@@ -235,7 +237,8 @@ inline uint64_t install_mdesc(wdesc_t wdesc)
 		{
 			complete_install(wdesc);
 		}
-	} while (false);
+		break;
+	}
 	return r;
 }
 
@@ -245,7 +248,7 @@ bool pmwcas_commit(mdesc_t mdesc)
 	for (off_t i = 0; status == ST_SUCCESS && i < mdesc->count; ++i) 
 	{
 		wdesc_t wdesc = mdesc->wdescs + i;
-		do {
+		while (true) {
 			/*
 			* try to install a pointer to mdesc for tha target word
 			*/
@@ -281,7 +284,8 @@ bool pmwcas_commit(mdesc_t mdesc)
 			* otherwise, CAS failed, so the whole PMwCAS fails
 			*/
 			status = ST_FAILED;
-		} while (false);
+			break;
+		}
 	}
 	uint64_t mdesc_ptr = mdesc.rel() | DIRTY_BIT | MwCAS_BIT;
 	
@@ -302,7 +306,6 @@ bool pmwcas_commit(mdesc_t mdesc)
 	*/
 	CAS(&mdesc->status, status | DIRTY_BIT, ST_UNDECIDED);
 	persist_clear(&mdesc->status, mdesc->status);
-	auto x = *mdesc;
 
 	/*
 	* install the final value for each word
@@ -329,7 +332,7 @@ bool pmwcas_commit(mdesc_t mdesc)
 uint64_t pmwcas_read(uint64_t * addr)
 {
 	uint64_t r;
-	do 
+	while (true)
 	{
 		r = *addr;
 		if (is_RDCSS(r))
@@ -347,7 +350,8 @@ uint64_t pmwcas_read(uint64_t * addr)
 			pmwcas_commit(mdesc_t(r & ADDR_MASK));
 			continue;
 		}
-	} while (false);
+		break;
+	}
 	return r;
 }
 

@@ -1,4 +1,6 @@
 #include <thread>
+#include <vector>
+#include <tuple>
 
 #include "bztree.h"
 #include "bzerrno.h"
@@ -16,14 +18,15 @@ int bz_node<Key, Val>::binary_search(uint64_t * meta_arr, int size, const Key * 
 	int left = -1, right = size;
 	while (left + 1 < right) {
 		int mid = left + (right - left) / 2;
-
+		uint64_t meta_rd = pmwcas_read(&meta_arr[mid]);
 		/* 空洞处理 BEGIN */
-		if (!is_visiable(meta_arr[mid])) {
+		if (!is_visiable(meta_rd)) {
 			bool go_left = true;
 			int left_mid = mid - 1, right_mid = mid + 1;
 			while (left_mid > left || right_mid < right) {
 				if (go_left && left_mid > left || right_mid == right) {
-					if (is_visiable(meta_arr[left_mid])) {
+					meta_rd = pmwcas_read(&meta_arr[left_mid]);
+					if (is_visiable(meta_rd)) {
 						mid = left_mid;
 						break;
 					}
@@ -31,7 +34,8 @@ int bz_node<Key, Val>::binary_search(uint64_t * meta_arr, int size, const Key * 
 					--left_mid;
 				}
 				if (!go_left && right_mid < right || left_mid == left) {
-					if (is_visiable(meta_arr[right_mid])) {
+					meta_rd = pmwcas_read(&meta_arr[right_mid]);
+					if (is_visiable(meta_rd)) {
 						mid = right_mid;
 						break;
 					}
@@ -45,12 +49,25 @@ int bz_node<Key, Val>::binary_search(uint64_t * meta_arr, int size, const Key * 
 		}
 		/* 空洞处理 END */
 
-		if (key_cmp(meta_arr[mid], key) < 0)
+		if (key_cmp(meta_rd, key) < 0)
 			left = mid;
 		else
 			right = mid;
 	}
 	return right;
+}
+
+template<typename Key, typename Val>
+bool bz_node<Key, Val>::pack_pmwcas(mdesc_pool_t pool, std::vector<std::tuple<rel_ptr<uint64_t>, uint64_t, uint64_t>> &casn)
+{
+	mdesc_t mdesc = pmwcas_alloc(pool);
+	if (mdesc.is_null())
+		return false;
+	for (auto cas : casn)
+		pmwcas_add(mdesc, std::get<0>(cas), std::get<1>(cas), std::get<2>(cas));
+	bool done = pmwcas_commit(mdesc);
+	pmwcas_free(mdesc);
+	return done;
 }
 
 /*
@@ -80,19 +97,22 @@ set meta entry to visiable and correct offset
 */
 /* 执行叶节点的数据项插入 */
 template<typename Key, typename Val>
-int bz_node<Key, Val>::insert(bz_tree<Key, Val> * tree, Key * key, Val * val, uint32_t key_size, uint32_t total_size, uint32_t alloc_epoch)
+int bz_node<Key, Val>::insert(bz_tree<Key, Val> * tree, const Key * key, const Val * val, uint32_t key_size, uint32_t total_size, uint32_t alloc_epoch)
 {
 	uint64_t * meta_arr = rec_meta_arr();
 	uint32_t sorted_cnt = get_sorted_count(length_);
 	uint32_t node_sz = get_node_size(length_);
 
 	/* UNIKEY 查找有序部分是否有重复键值 */
-	int bin_pos = binary_search(meta_arr, sorted_cnt, key);
-	if (bin_pos != sorted_cnt && !key_cmp(meta_arr[bin_pos], key))
-		return EUNIKEY;
+	int pos = binary_search(meta_arr, sorted_cnt, key);
+	if (pos != sorted_cnt) {
+		uint64_t meta_rd = pmwcas_read(&meta_arr[pos]);
+		if (is_visiable(meta_rd) && !key_cmp(meta_rd, key))
+			return EUNIKEY;
+	}
 
 	bool done, retry = false;
-	uint64_t tmp_offset = alloc_epoch, meta_new;
+	uint64_t meta_new;
 	uint32_t rec_cnt, blk_sz;
 	do
 	{
@@ -106,14 +126,16 @@ int bz_node<Key, Val>::insert(bz_tree<Key, Val> * tree, Key * key, Val * val, ui
 		if (blk_sz + total_size + sizeof(uint64_t) * (1 + rec_cnt) + sizeof(*this) > node_sz)
 			return EALLOCSIZE;
 
+		uint64_t meta_rd;
 		/* UNIKEY 查找无序部分是否有重复键值 */
 		for (auto i = sorted_cnt; i < rec_cnt; ++i)
 		{
-			if (is_visiable(meta_arr[i])) {
-				if (!key_cmp(meta_arr[i], key))
+			meta_rd = pmwcas_read(&meta_arr[i]);
+			if (is_visiable(meta_rd)) {
+				if (!key_cmp(meta_rd, key))
 					return EUNIKEY;
 			}
-			else if (!retry && get_offset(meta_arr[i]) == tmp_offset)
+			else if (!retry && get_offset(meta_rd) == alloc_epoch)
 				retry = true;
 		}
 
@@ -123,21 +145,23 @@ int bz_node<Key, Val>::insert(bz_tree<Key, Val> * tree, Key * key, Val * val, ui
 		set_block_size(status_new, blk_sz + total_size);
 		
 		/* 设置offset为alloc_epoch, unset visiable bit */
-		uint64_t meta_rd = pmwcas_read(meta_arr + rec_cnt);
+		meta_rd = pmwcas_read(&meta_arr[rec_cnt]);
 		meta_new = meta_rd;
-		set_offset(meta_new, tmp_offset);
+		set_offset(meta_new, alloc_epoch);
 		unset_visiable(meta_new);
 
 		/* 2-word PMwCAS */
-		mdesc_t mdesc = pmwcas_alloc(&tree->pool_);
-		if (mdesc.is_null())
-			return EPMWCASALLOC;
-		pmwcas_add(mdesc, &status_, status_rd, status_new);
-		pmwcas_add(mdesc, &meta_arr[rec_cnt], meta_rd, meta_new);
-		done = pmwcas_commit(mdesc);
-		pmwcas_free(mdesc);
+		std::vector<std::tuple<rel_ptr<uint64_t>, uint64_t, uint64_t>> casn;
+		casn.emplace_back(&status_, status_rd, status_new);
+		casn.emplace_back(&meta_arr[rec_cnt], meta_rd, meta_new);
+		done = pack_pmwcas(&tree->pool_, casn);
+		if (!done)
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	} while (!done);
 
+
+	/* WARNING: should we use CAS here?
+	No need. Reservation works to protect this area. */
 	uint32_t new_offset = node_sz - blk_sz - total_size - 1;
 	set_key(new_offset, key);
 	set_value(new_offset + key_size, val);
@@ -147,14 +171,17 @@ int bz_node<Key, Val>::insert(bz_tree<Key, Val> * tree, Key * key, Val * val, ui
 		auto i = sorted_cnt;
 		while (i < rec_cnt)
 		{
-			if (is_visiable(meta_arr[i])) {
-				if (!key_cmp(meta_arr[i], key)) {
+			uint64_t meta_rd = pmwcas_read(&meta_arr[i]);
+			if (is_visiable(meta_rd)) {
+				if (!key_cmp(meta_rd, key)) {
+					/* WARNING: should we use CAS here?
+					No need. Record is now unvisiable to other threads. */
 					set_offset(meta_arr[rec_cnt], 0);
 					persist(&meta_arr[rec_cnt], sizeof(uint64_t));
 					return EUNIKEY;
 				}
 			}
-			else if (get_offset(meta_arr[i]) == tmp_offset) {
+			else if (get_offset(meta_rd) == alloc_epoch) {
 				// 潜在的UNIKEY竞争，必须等待其完成
 				std::this_thread::sleep_for(std::chrono::milliseconds(1));
 				continue;
@@ -174,16 +201,19 @@ int bz_node<Key, Val>::insert(bz_tree<Key, Val> * tree, Key * key, Val * val, ui
 	while (!done)
 	{
 		uint64_t status_rd = pmwcas_read(&status_);
-		if (is_frozen(status_rd))
+		if (is_frozen(status_rd)) {
+ 			/* WARNING: should we use CAS here? 
+			No need. Record is now unvisiable to other threads. */
+			set_offset(meta_arr[rec_cnt], 0);
+			persist(&meta_arr[rec_cnt], sizeof(uint64_t));
 			return EFROZEN;
-		mdesc_t mdesc = pmwcas_alloc(&tree->pool_);
-		if (mdesc.is_null())
-			return EPMWCASALLOC;
-		pmwcas_add(mdesc, &meta_arr[rec_cnt], meta_new, meta_new_plus);
-		pmwcas_add(mdesc, &status_, status_rd, status_rd);
-		if (pmwcas_commit(mdesc))
-			done = true;
-		pmwcas_free(mdesc);
+		}
+		std::vector<std::tuple<rel_ptr<uint64_t>, uint64_t, uint64_t>> casn;
+		casn.emplace_back(&status_, status_rd, status_rd);
+		casn.emplace_back(&meta_arr[rec_cnt], meta_new, meta_new_plus);
+		done = pack_pmwcas(&tree->pool_, casn);
+		if (!done)
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
 	
 	return 0;
@@ -196,7 +226,76 @@ delete:
 	1.1) if fails due to Frozen bit set, abort and retraverse
 	1.2) otherwise, read and retry
 */
+template<typename Key, typename Val>
+int bz_node<Key, Val>::remove(bz_tree<Key, Val> * tree, const Key * key)
+{
+	uint64_t status_rd = pmwcas_read(&status_);
+	if (is_frozen(status_rd))
+		return EFROZEN;
 
+	uint64_t * meta_arr = rec_meta_arr();
+	uint32_t sorted_cnt = get_sorted_count(length_);
+
+	bool found = false;
+	uint64_t meta_rd;
+	
+	/* 二分查找有序键值部分 */
+	uint32_t pos = binary_search(meta_arr, sorted_cnt, key);
+	if (pos != sorted_cnt) {
+		meta_rd = pmwcas_read(&meta_arr[pos]);
+		if (is_visiable(meta_rd) && !key_cmp(meta_rd, key))
+			found = true;
+	}
+
+	if (!found)
+	{
+		uint32_t rec_cnt = get_record_count(status_rd);
+		/* 查找无序部分是否有key */
+		for (pos = sorted_cnt; pos < rec_cnt; ++pos) {
+			meta_rd = pmwcas_read(&meta_arr[pos]);
+			if (is_visiable(meta_rd) && !key_cmp(meta_rd, key)) {
+				found = true;
+				break;
+			}
+		}
+	}
+
+	if (found) {
+		bool done;
+		do {
+			status_rd = pmwcas_read(&status_);
+			if (is_frozen(status_rd))
+				return EFROZEN;
+
+			meta_rd = pmwcas_read(&meta_arr[pos]);
+			if (!is_visiable(meta_rd)) {
+				/* 遭遇其他线程的竞争删除 */
+				return ENOTFOUND;
+			}
+
+			/* 增加delete size */
+			uint64_t status_new = status_rd;
+			uint32_t dele_sz = get_delete_size(status_rd);
+			uint32_t total_sz = get_total_length(meta_rd);
+			set_delete_size(status_new, dele_sz + total_sz);
+
+			/* unset visible，offset=0*/
+			uint64_t meta_new = meta_rd;
+			unset_visiable(meta_new);
+			set_offset(meta_new, 0);
+
+			/* 执行 pmwcas */
+			std::vector<std::tuple<rel_ptr<uint64_t>, uint64_t, uint64_t>> casn;
+			casn.emplace_back(&status_, status_rd, status_new);
+			casn.emplace_back(&meta_arr[pos], meta_rd, meta_new);
+			done = pack_pmwcas(&tree->pool_, casn);
+			if (!done)
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		} while (!done);
+		return 0;
+	}
+	return ENOTFOUND;
+}
 /*
 update(swap pointer):
 1) 3-word PMwCAS
@@ -299,7 +398,10 @@ uint64_t * bz_node<Key, Val>::rec_meta_arr() {
 /* K-V getter and setter */
 template<typename Key, typename Val>
 Key * bz_node<Key, Val>::get_key(uint64_t meta) {
-	return (Key*)((char*)this + get_offset(meta));
+	uint32_t off = get_offset(meta);
+	if (is_visiable(meta) && off)
+		return (Key*)((char*)this + off);
+	return nullptr;
 }
 template<typename Key, typename Val>
 void bz_node<Key, Val>::set_key(uint32_t offset, const Key *key) {
@@ -311,7 +413,10 @@ void bz_node<Key, Val>::set_key(uint32_t offset, const Key *key) {
 }
 template<typename Key, typename Val>
 Val * bz_node<Key, Val>::get_value(uint64_t meta) {
-	return (Val*)((char*)this + get_offset(meta) + get_key_length(meta));
+	uint32_t off = get_offset(meta);
+	if (is_visiable(meta) && off)
+		return (Val*)((char*)this + off + get_key_length(meta));
+	return nullptr;
 }
 template<typename Key, typename Val>
 void bz_node<Key, Val>::set_value(uint32_t offset, const Val * val) {
