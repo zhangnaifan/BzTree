@@ -5,7 +5,7 @@
 #include "bztree.h"
 #include "bzerrno.h"
 
-struct bz_node_fake{};
+struct bz_node_fake {};
 POBJ_LAYOUT_BEGIN(layout_name);
 POBJ_LAYOUT_TOID(layout_name, struct bz_node_fake);
 POBJ_LAYOUT_END(layout_name);
@@ -35,8 +35,6 @@ set meta entry to visiable and correct offset
 7.1) if fails and Frozen bit is not set, read status and retry
 7.2) if Frozen bit is set, abort and retry the insert
 */
-
-
 /* 执行叶节点的数据项插入 */
 template<typename Key, typename Val>
 int bz_node<Key, Val>::insert(bz_tree<Key, Val> * tree, const Key * key, const Val * val, uint32_t key_size, uint32_t total_size, uint32_t alloc_epoch)
@@ -44,7 +42,8 @@ int bz_node<Key, Val>::insert(bz_tree<Key, Val> * tree, const Key * key, const V
 	/* Global variables */
 	uint64_t * meta_arr = rec_meta_arr();
 	uint32_t node_sz = get_node_size(length_);
-	bool retry = false;
+	uint32_t sorted_cnt = get_sorted_count(length_);
+	bool recheck = false;
 	uint64_t meta_new;
 	uint32_t rec_cnt, blk_sz;
 
@@ -53,9 +52,16 @@ int bz_node<Key, Val>::insert(bz_tree<Key, Val> * tree, const Key * key, const V
 	if (find_key_sorted(key, pos))
 		return EUNIKEY;
 
+	uint64_t status_rd = pmwcas_read(&status_);
+	if (is_frozen(status_rd))
+		return EFROZEN;
+	/* UNIKEY 查找无序部分是否有重复键值 */
+	if (find_key_unsorted(key, status_rd, alloc_epoch, pos, recheck))
+		return EUNIKEY;
+
 	while (true)
 	{
-		uint64_t status_rd = pmwcas_read(&status_);
+		status_rd = pmwcas_read(&status_);
 		if (is_frozen(status_rd))
 			return EFROZEN;
 		rec_cnt = get_record_count(status_rd);
@@ -65,14 +71,9 @@ int bz_node<Key, Val>::insert(bz_tree<Key, Val> * tree, const Key * key, const V
 		if (blk_sz + total_size + sizeof(uint64_t) * (1 + rec_cnt) + sizeof(*this) > node_sz)
 			return EALLOCSIZE;
 
-		/* UNIKEY 查找无序部分是否有重复键值 */
-		uint32_t pos;
-		if (find_key_unsorted(key, rec_cnt, alloc_epoch, pos, retry))
-			return EUNIKEY;
-
 		/* 增加record count和block size */
 		uint64_t status_new = status_add_rec_blk(status_rd, total_size);
-		
+
 		/* 设置offset为alloc_epoch, unset visiable bit */
 		uint64_t meta_rd = pmwcas_read(&meta_arr[rec_cnt]);
 		meta_new = meta_vis_off(meta_rd, false, alloc_epoch);
@@ -83,6 +84,7 @@ int bz_node<Key, Val>::insert(bz_tree<Key, Val> * tree, const Key * key, const V
 			{ &meta_arr[rec_cnt], meta_rd, meta_new }
 			}))
 			break;
+		recheck = true;
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
 
@@ -90,8 +92,8 @@ int bz_node<Key, Val>::insert(bz_tree<Key, Val> * tree, const Key * key, const V
 	uint32_t new_offset = node_sz - blk_sz - total_size - 1;
 	copy_data(new_offset, key, val, key_size, total_size);
 
-	if (retry) {
-		int ret = rescan_unsorted(rec_cnt, key, total_size, alloc_epoch);
+	if (recheck) {
+		int ret = rescan_unsorted(sorted_cnt, rec_cnt, key, total_size, alloc_epoch);
 		if (ret)
 			return ret;
 	}
@@ -101,10 +103,10 @@ int bz_node<Key, Val>::insert(bz_tree<Key, Val> * tree, const Key * key, const V
 
 	while (true)
 	{
-		uint64_t status_rd = pmwcas_read(&status_);
+		status_rd = pmwcas_read(&status_);
 		if (is_frozen(status_rd)) {
 			set_offset(meta_arr[rec_cnt], 0);
-			persist(&meta_arr[rec_cnt], 0);
+			persist(&meta_arr[rec_cnt], sizeof(uint64_t));
 			return EFROZEN;
 		}
 		/* 2-word PMwCAS */
@@ -115,16 +117,16 @@ int bz_node<Key, Val>::insert(bz_tree<Key, Val> * tree, const Key * key, const V
 			break;
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
-	
+
 	return 0;
 }
 /*
 delete:
 1) 2-word PMwCAS on
-	meta entry: visiable = 0, offset = 0
-	node status: delete size += data length
-	1.1) if fails due to Frozen bit set, abort and retraverse
-	1.2) otherwise, read and retry
+meta entry: visiable = 0, offset = 0
+node status: delete size += data length
+1.1) if fails due to Frozen bit set, abort and retraverse
+1.2) otherwise, read and retry
 */
 /* 叶节点删除 */
 template<typename Key, typename Val>
@@ -147,7 +149,7 @@ int bz_node<Key, Val>::remove(bz_tree<Key, Val> * tree, const Key * key)
 	/* 查找无序部分是否有key */
 	if (!found) {
 		bool useless;
-		found = find_key_unsorted(key, rec_cnt, 0, pos, useless);
+		found = find_key_unsorted(key, status_rd, 0, pos, useless);
 	}
 
 	if (found) {
@@ -164,7 +166,7 @@ int bz_node<Key, Val>::remove(bz_tree<Key, Val> * tree, const Key * key)
 			}
 
 			/* 增加delete size */
-			uint64_t status_new = status_del(meta_rd, status_rd);
+			uint64_t status_new = status_del(status_rd, get_total_length(meta_rd));
 
 			/* unset visible，offset=0*/
 			uint64_t meta_new = meta_vis_off(meta_rd, false, 0);
@@ -182,12 +184,136 @@ int bz_node<Key, Val>::remove(bz_tree<Key, Val> * tree, const Key * key)
 	return ENOTFOUND;
 }
 /*
-update(swap pointer):
-1) 3-word PMwCAS
-	pointer in storage block
-	meta entry status => competing delete
-	node status => Frozen bit
+update
+1) writer tests Frozen Bit, retraverse if failed
+to find the target key:
+2) scan the sorted keys, store the positon if find the target key
+2.1) if not found, scan the unsorted keys, fail if cannot find, otherwise store the pos
+2.2) if meet a meta entry whose visiable unset and epoch = current global epoch,
+set Retry bit and continue
+3.1) reserve space in meta entry and block
+by adding one to record count and adding data length to node block size(both in node status)
+and setting the offset to current index global epoch and unset visual
+3.2) in case fail => concurrent thread may be trying to insert duplicate key,
+so need to set Recheck flag. and keep reading status, and perform pmwcas
+
+4) copy data to block
+5) persist
+6) re-scan the area (key_pos, rec_cnt) if Recheck is set
+6.1) if find a duplicate key, set offset and block = 0
+return fail
+7) 3-word PMwCAS:
+set status back => Frozen Bit isn't set
+set updated meta entry to visiable and correct offset
+set origin meta entry to unvisualable and offset = 0
+in case fail:
+7.1) Frozen set => return fail
+7.2) origin meta entry not visual => return fail
+otherwise, read origin meta and status, retry pmwcas
 */
+/* 叶节点数据更新 */
+template<typename Key, typename Val>
+int bz_node<Key, Val>::update(bz_tree<Key, Val> * tree, const Key * key, const Val * val, uint32_t key_size, uint32_t total_size, uint32_t alloc_epoch)
+{
+	/* Global variables */
+	uint64_t * meta_arr = rec_meta_arr();
+	uint32_t node_sz = get_node_size(length_);
+	uint32_t sorted_cnt = get_sorted_count(length_);
+	bool recheck = false;
+	uint64_t meta_new;
+	uint32_t rec_cnt, blk_sz;
+
+	/* not Frozen */
+	uint64_t status_rd = pmwcas_read(&status_);
+	if (is_frozen(status_rd))
+		return EFROZEN;
+
+	/* 查找目标键值的位置 */
+	uint32_t del_pos;
+	if (!find_key_sorted(key, del_pos) 
+		&& !find_key_unsorted(key, status_rd, alloc_epoch, del_pos, recheck))
+		return ENOTFOUND;
+	
+	while (true)
+	{
+		status_rd = pmwcas_read(&status_);
+		if (is_frozen(status_rd))
+			return EFROZEN;
+		rec_cnt = get_record_count(status_rd);
+		blk_sz = get_block_size(status_rd);
+
+		/* 可容纳 */
+		if (blk_sz + total_size + sizeof(uint64_t) * (1 + rec_cnt) + sizeof(*this) > node_sz)
+			return EALLOCSIZE;
+
+		/* 增加record count和block size */
+		uint64_t status_new = status_add_rec_blk(status_rd, total_size);
+
+		/* 设置offset为alloc_epoch, unset visiable bit */
+		uint64_t meta_rd = pmwcas_read(&meta_arr[rec_cnt]);
+		meta_new = meta_vis_off(meta_rd, false, alloc_epoch);
+
+		/* 2-word PMwCAS */
+		if (pack_pmwcas(&tree->pool_, {
+			{ &status_, status_rd, status_new },
+			{ &meta_arr[rec_cnt], meta_rd, meta_new }
+			}))
+			break;
+		recheck = true;
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+
+	/* copy key and val */
+	uint32_t new_offset = node_sz - blk_sz - total_size - 1;
+	copy_data(new_offset, key, val, key_size, total_size);
+
+	if (recheck) {
+		int ret = rescan_unsorted(del_pos + 1, rec_cnt, key, total_size, alloc_epoch);
+		if (ret)
+			return ret;
+	}
+
+	/* set visiable; real offset; key_len and tot_len */
+	uint64_t meta_new_plus = meta_vis_off_klen_tlen(meta_new, true, new_offset, key_size, total_size);
+
+	while (true)
+	{
+		status_rd = pmwcas_read(&status_);
+		if (is_frozen(status_rd)) {
+			/* frozen set */
+			set_offset(meta_arr[rec_cnt], 0);
+			persist(&meta_arr[rec_cnt], sizeof(uint64_t));
+			return EFROZEN;
+		}
+		uint64_t meta_del = pmwcas_read(&meta_arr[del_pos]);
+		if (!is_visiable(meta_del)) {
+			uint64_t status_new;
+			/* 遭遇竞争删除或更新，放弃保留的空间 */
+			set_offset(meta_arr[rec_cnt], 0);
+			persist(&meta_arr[rec_cnt], sizeof(uint64_t));
+			do {
+				status_rd = pmwcas_read(&status_);
+				status_new = status_del(status_rd, total_size);
+			} while (!is_frozen(status_rd)
+				&& CAS(&status_, status_new, status_rd) != status_rd);
+			if (is_frozen(status_rd))
+				return EFROZEN;
+			return EUNIKEY;
+		}
+		uint64_t status_new = status_del(status_rd, get_total_length(meta_del));
+		uint64_t meta_del_new = meta_vis_off(meta_del, false, 0);
+		/* 3-word PMwCAS */
+		if (pack_pmwcas(&tree->pool_, {
+			{ &status_, status_rd, status_new },
+			{ &meta_arr[rec_cnt], meta_new, meta_new_plus },
+			{ &meta_arr[del_pos], meta_del, meta_del_new }
+			}))
+			break;
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+
+	return 0;
+}
 
 /*
 read
@@ -211,20 +337,20 @@ one leaf node at a time
 consolidate:
 
 trigger by
-	either free space too small or deleted space too large
+either free space too small or deleted space too large
 
 1) single-word PMwCAS on status => frozen bit
 2) scan all valid records(visiable and not deleted)
-	calculate node size = record size + free space
-	2.1) if node size too large, do a split
-	2.2) otherwise, allocate a new node N', copy records sorted, init header
+calculate node size = record size + free space
+2.1) if node size too large, do a split
+2.2) otherwise, allocate a new node N', copy records sorted, init header
 3) use path stack to find Node's parent P
-	3.1) if P's frozen, retraverse to locate P
+3.1) if P's frozen, retraverse to locate P
 4) 2-word PMwCAS
-	r in P that points to N => N'
-	P's status => detect concurrent freeze
+r in P that points to N => N'
+P's status => detect concurrent freeze
 5) N is ready for gc
-6) 
+6)
 */
 
 /* 首次使用BzTree */
@@ -295,16 +421,17 @@ bool bz_node<Key, Val>::find_key_sorted(const Key * key, uint32_t &pos)
 /*
 * 在键值无序存储部分线性查找 @param key
 * @param rec_cnt: 最大边界位置
-* @param alloc_epoch: retry的判断条件
+* @param alloc_epoch: recheck的判断条件
 * 返回结果bool
 * 返回位置 @param pos
-* 返回重试标志 @param retry
+* 返回重试标志 @param recheck
 */
 template<typename Key, typename Val>
-bool bz_node<Key, Val>::find_key_unsorted(const Key * key, uint32_t rec_cnt, uint32_t alloc_epoch, uint32_t &pos, bool &retry)
+bool bz_node<Key, Val>::find_key_unsorted(const Key * key, uint64_t status_rd, uint32_t alloc_epoch, uint32_t &pos, bool &retry)
 {
 	uint64_t * meta_arr = rec_meta_arr();
 	uint32_t sorted_cnt = get_sorted_count(length_);
+	uint32_t rec_cnt = get_record_count(status_rd);
 	for (pos = sorted_cnt; pos < rec_cnt; ++pos)
 	{
 		uint64_t meta_rd = pmwcas_read(&meta_arr[pos]);
@@ -336,11 +463,10 @@ uint64_t bz_node<Key, Val>::status_add_rec_blk(uint64_t status_rd, uint32_t tota
 * 返回新meta_entry uint64_t
 */
 template<typename Key, typename Val>
-uint64_t bz_node<Key, Val>::status_del(uint64_t meta_rd, uint64_t status_rd)
+uint64_t bz_node<Key, Val>::status_del(uint64_t status_rd, uint32_t total_size)
 {
 	uint32_t dele_sz = get_delete_size(status_rd);
-	uint32_t total_sz = get_total_length(meta_rd);
-	set_delete_size(status_rd, dele_sz + total_sz);
+	set_delete_size(status_rd, dele_sz + total_size);
 	return status_rd;
 }
 /*
@@ -393,24 +519,21 @@ void bz_node<Key, Val>::copy_data(uint32_t new_offset, const Key * key, const Va
 /*
 * 重新扫描无序键值区域 */
 template<typename Key, typename Val>
-int bz_node<Key, Val>::rescan_unsorted(uint32_t rec_cnt, const Key * key, uint32_t total_size, uint32_t alloc_epoch)
+int bz_node<Key, Val>::rescan_unsorted(uint32_t beg_pos, uint32_t rec_cnt, const Key * key, uint32_t total_size, uint32_t alloc_epoch)
 {
 	uint64_t * meta_arr = rec_meta_arr();
-	uint32_t i = get_sorted_count(length_);
+	uint32_t i = beg_pos;
 	while (i < rec_cnt)
 	{
 		uint64_t meta_rd = pmwcas_read(&meta_arr[i]);
 		if (is_visiable(meta_rd)) {
 			if (!key_cmp(meta_rd, key)) {
 				set_offset(meta_arr[rec_cnt], 0);
-				persist(&meta_arr[rec_cnt], 0);
+				persist(&meta_arr[rec_cnt], sizeof(uint64_t));
 				uint64_t status_rd, status_new;
-				do
-				{
+				do {
 					status_rd = pmwcas_read(&status_);
-					status_new = status_rd;
-					uint32_t dele_sz = get_delete_size(status_rd);
-					set_delete_size(status_new, dele_sz + total_size);
+					status_new = status_del(status_rd, total_size);
 				} while (!is_frozen(status_rd)
 					&& CAS(&status_, status_new, status_rd) != status_rd);
 				if (is_frozen(status_rd))

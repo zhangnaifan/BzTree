@@ -16,15 +16,18 @@ struct pmem_test {
 		bz_tree<int, rel_ptr<int>> tree;
 		int data[512];
 	};
-	void pmem_worker(pmem_test::pmem_layout * top_obj, int *k, rel_ptr<int> *v, int extra, bool write, bool dele) {
+	void pmem_worker(pmem_test::pmem_layout * top_obj, int *k, rel_ptr<int> *v, int extra, bool write, bool dele, bool update) {
 		for (int i = 0; i < extra; ++i) {
 			if (write) {
-				int ret = top_obj->tree.root_->insert(&top_obj->tree, k + i, v + i, 4, 12, 1);
+				int ret = top_obj->tree.root_->insert(&top_obj->tree, k + i, v + i, 4, 12, 0xabcd);
 				assert(!ret || ret == EUNIKEY);
 			}
 			if (dele) {
 				int ret = top_obj->tree.root_->remove(&top_obj->tree, k + i);
 				assert(!ret || ret == ENOTFOUND);
+			}
+			if (update) {
+				int ret = top_obj->tree.root_->update(&top_obj->tree, k + i, v + i + 1, 4, 12, 0xabcd);
 			}
 		}
 	}
@@ -48,8 +51,9 @@ struct pmem_test {
 		bool first = true, 
 		bool write = true, 
 		bool dele = false,
+		bool update = false,
 		int node_sz = 600 * 16, 
-		int sz = 24
+		int sz = 36
 	) {
 		const char * fname = "test.pool";
 		PMEMobjpool * pop;
@@ -86,7 +90,7 @@ struct pmem_test {
 			vals[i] = &top_obj->data[i];
 		}
 		thread t[512];
-		int extra = 8;
+		int extra = 24;
 		int empty_run = 16;
 		for (int i = sz; i < sz + empty_run; ++i)
 		{
@@ -99,7 +103,7 @@ struct pmem_test {
 			t[i] = thread(&pmem_test::pmem_worker,
 				this, top_obj, &keys[i], &vals[i],
 				sz - i > extra ? extra : sz - i,
-				write, dele);
+				write, dele, update);
 		}
 		for (int i = 0; i < sz + empty_run; ++i) {
 			t[i].join();

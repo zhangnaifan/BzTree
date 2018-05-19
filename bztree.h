@@ -10,35 +10,38 @@ struct bz_tree;
 template<typename Key, typename Val>
 struct bz_node
 {
-	/* 3: PMwCAS control, 1: frozen, 16: record count, 22: block size, 22: delete size */
+	/* status 3: PMwCAS control, 1: frozen, 16: record count, 22: block size, 22: delete size */
 	uint64_t status_;
-	/* 32: node size, 32: sorted count */
+	/* length 32: node size, 32: sorted count */
 	uint64_t length_;
-	/* record meta entry */
-	/* 3: PMwCAS control, 1: visiable, 28: offset, 16: key length, 16: total length */
+	/* record meta entry 3: PMwCAS control, 1: visiable, 28: offset, 16: key length, 16: total length */
 	uint64_t * rec_meta_arr();
+	
 	/* K-V getter and setter */
 	Key * get_key(uint64_t meta);
 	void set_key(uint32_t offset, const Key * key);
 	Val * get_value(uint64_t meta);
 	void set_value(uint32_t offset, const Val * val);
+	
 	/* 键值比较函数 */
 	int key_cmp(uint64_t meta_1, const Key * key);
-	/* 二分查找 */
-	int binary_search(uint64_t * meta_arr, int size, const Key * key);
+	
 	/* 辅助函数 */
+	int binary_search(uint64_t * meta_arr, int size, const Key * key);
 	bool pack_pmwcas(mdesc_pool_t pool, std::vector<std::tuple<rel_ptr<uint64_t>, uint64_t, uint64_t>> casn);
 	bool find_key_sorted(const Key * key, uint32_t &pos);
-	bool find_key_unsorted(const Key * key, uint32_t rec_cnt, uint32_t alloc_epoch, uint32_t &pos, bool &retry);
+	bool find_key_unsorted(const Key * key, uint64_t status_rd, uint32_t alloc_epoch, uint32_t &pos, bool &recheck);
 	uint64_t status_add_rec_blk(uint64_t status_rd, uint32_t total_size);
+	uint64_t status_del(uint64_t status_rd, uint32_t total_size);
 	uint64_t meta_vis_off(uint64_t meta_rd, bool set_vis, uint32_t new_offset);
-	void copy_data(uint32_t new_offset, const Key * key, const Val * val, uint32_t key_size, uint32_t total_size);
-	int rescan_unsorted(uint32_t rec_cnt, const Key * key, uint32_t total_size, uint32_t alloc_epoch);
 	uint64_t meta_vis_off_klen_tlen(uint64_t meta_rd, bool set_vis, uint32_t new_offset, uint32_t key_size, uint32_t total_size);
-	uint64_t status_del(uint64_t meta_rd, uint64_t status_rd);
+	void copy_data(uint32_t new_offset, const Key * key, const Val * val, uint32_t key_size, uint32_t total_size);
+	int rescan_unsorted(uint32_t beg_pos, uint32_t rec_cnt, const Key * key, uint32_t total_size, uint32_t alloc_epoch);
+	
 	/* 执行叶节点的数据项操作 */
 	int insert(bz_tree<Key, Val> * tree, const Key * key, const Val * val, uint32_t key_size, uint32_t total_size, uint32_t alloc_epoch);
 	int remove(bz_tree<Key, Val> * tree, const Key * key);
+	int update(bz_tree<Key, Val> * tree, const Key * key, const Val * val, uint32_t key_size, uint32_t total_size, uint32_t alloc_epoch);
 };
 
 /* BzTree */
