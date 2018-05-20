@@ -56,6 +56,13 @@ struct pmem_test {
 				cout << " : NO RECORD" << endl;
 		}
 	}
+	void range_scan(pmem_layout * top_obj, int * beg, int * end)
+	{
+		auto res = top_obj->tree.root_->range_scan(beg, end);
+		for (auto kv : res) {
+			cout << *kv.first << " : " << **kv.second << endl;
+		}
+	}
 	void run(
 		bool first = true, 
 		bool write = true, 
@@ -132,6 +139,7 @@ struct pmem_test {
 				++real_cnt;
 		assert((rec_cnt - real_cnt) * 12 == del_sz);
 		show_mem(top_obj, rec_cnt);
+		range_scan(top_obj, keys + 2, keys + sz - 2);
 		tree.finish();
 		pmemobj_close(pop);
 	}

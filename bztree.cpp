@@ -1,6 +1,7 @@
 #include <thread>
 #include <vector>
 #include <tuple>
+#include <memory>
 
 #include "bztree.h"
 #include "bzerrno.h"
@@ -463,6 +464,56 @@ one leaf node at a time
 5) enter new epoch
 6) greater than search the largest key in response array
 */
+template<typename Key, typename Val>
+void bz_node<Key, Val>::copy_data(uint64_t meta_rd, std::vector<std::pair<std::shared_ptr<Key>, std::shared_ptr<Val>>> & res)
+{
+	shared_ptr<Key> sp_key;
+	if (typeid(Key) == typeid(char)) {
+		sp_key = shared_ptr<Key>(new Key[get_key_length(meta_rd)], [](Key *p) {delete[] p; });
+	}
+	else {
+		sp_key = make_shared<Key>(*get_key(meta_rd));
+	}
+	shared_ptr<Val> sp_val;
+	if (typeid(Val) == typeid(char)) {
+		uint32_t val_sz = get_total_length(meta_rd) - get_key_length(meta_rd);
+		sp_val = shared_ptr<Val>(new Val[val_sz], [](Val *p) {delete[] p; });
+	}
+	else {
+		sp_val = make_shared<Val>(*get_value(meta_rd));
+	}
+	res.emplace_back(make_pair(sp_key, sp_val));
+}
+
+template<typename Key, typename Val>
+std::vector<std::pair<std::shared_ptr<Key>, std::shared_ptr<Val>>> 
+bz_node<Key, Val>::range_scan(const Key * beg_key, const Key * end_key)
+{
+	std::vector<std::pair<std::shared_ptr<Key>, std::shared_ptr<Val>>> res;
+	uint64_t * meta_arr = rec_meta_arr();
+	uint32_t sorted_cnt = get_sorted_count(length_);
+
+	uint32_t bin_beg_pos = binary_search(meta_arr, sorted_cnt, beg_key);
+	uint32_t bin_end_pos = end_key ? binary_search(meta_arr, sorted_cnt, end_key) : sorted_cnt;
+	for (uint32_t i = bin_beg_pos; i < bin_end_pos; ++i) {
+		uint64_t meta_rd = pmwcas_read(&meta_arr[i]);
+		if (is_visiable(meta_rd) && key_cmp(meta_rd, beg_key) >= 0
+			&& (!end_key || key_cmp(meta_rd, end_key) < 0))
+			copy_data(meta_rd, res);
+	}
+
+	uint64_t status_rd = pmwcas_read(&status_);
+	uint32_t rec_cnt = get_record_count(status_rd);
+	for (uint32_t i = sorted_cnt; i < rec_cnt; ++i) {
+		uint64_t meta_rd = pmwcas_read(&meta_arr[i]);
+		if (is_visiable(meta_rd) && key_cmp(meta_rd, beg_key) >= 0
+			&& (!end_key || key_cmp(meta_rd, end_key) < 0)) {
+			copy_data(meta_rd, res);
+		}
+	}
+
+	return res;
+}
 
 /*
 consolidate:

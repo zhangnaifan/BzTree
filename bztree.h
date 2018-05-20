@@ -37,6 +37,7 @@ struct bz_node
 	uint64_t meta_vis_off(uint64_t meta_rd, bool set_vis, uint32_t new_offset);
 	uint64_t meta_vis_off_klen_tlen(uint64_t meta_rd, bool set_vis, uint32_t new_offset, uint32_t key_size, uint32_t total_size);
 	void copy_data(uint32_t new_offset, const Key * key, const Val * val, uint32_t key_size, uint32_t total_size);
+	void copy_data(uint64_t meta_rd, std::vector<std::pair<std::shared_ptr<Key>, std::shared_ptr<Val>>> & res);
 	int rescan_unsorted(uint32_t beg_pos, uint32_t rec_cnt, const Key * key, uint32_t total_size, uint32_t alloc_epoch);
 	
 	/* 执行叶节点的数据项操作 */
@@ -45,7 +46,7 @@ struct bz_node
 	int update(bz_tree<Key, Val> * tree, const Key * key, const Val * val, uint32_t key_size, uint32_t total_size, uint32_t alloc_epoch);
 	int   read(bz_tree<Key, Val> * tree, const Key * key, Val * val, uint32_t max_val_size);
 	int upsert(bz_tree<Key, Val> * tree, const Key * key, const Val * val, uint32_t key_size, uint32_t total_size, uint32_t alloc_epoch);
-
+	std::vector<std::pair<std::shared_ptr<Key>, std::shared_ptr<Val>>> range_scan(const Key * beg_key, const Key * end_key);
 };
 
 /* BzTree */
