@@ -16,7 +16,8 @@ struct pmem_test {
 		bz_tree<int, rel_ptr<int>> tree;
 		int data[512];
 	};
-	void pmem_worker(pmem_test::pmem_layout * top_obj, int *k, rel_ptr<int> *v, int extra, bool write, bool dele, bool update) {
+	void pmem_worker(pmem_test::pmem_layout * top_obj, int *k, rel_ptr<int> *v, int extra, 
+		bool write, bool dele, bool update, bool read) {
 		for (int i = 0; i < extra; ++i) {
 			if (write) {
 				int ret = top_obj->tree.root_->insert(&top_obj->tree, k + i, v + i, 4, 12, 0xabcd);
@@ -28,6 +29,11 @@ struct pmem_test {
 			}
 			if (update) {
 				int ret = top_obj->tree.root_->update(&top_obj->tree, k + i, v + i + 1, 4, 12, 0xabcd);
+			}
+			if (read) {
+				rel_ptr<int> data;
+				int ret = top_obj->tree.root_->read(&top_obj->tree, k + i, &data, 8);
+				assert(!ret && *data == **(v+i));
 			}
 		}
 	}
@@ -52,6 +58,7 @@ struct pmem_test {
 		bool write = true, 
 		bool dele = false,
 		bool update = false,
+		bool read = false,
 		int node_sz = 600 * 16, 
 		int sz = 36
 	) {
@@ -103,7 +110,7 @@ struct pmem_test {
 			t[i] = thread(&pmem_test::pmem_worker,
 				this, top_obj, &keys[i], &vals[i],
 				sz - i > extra ? extra : sz - i,
-				write, dele, update);
+				write, dele, update, read);
 		}
 		for (int i = 0; i < sz + empty_run; ++i) {
 			t[i].join();

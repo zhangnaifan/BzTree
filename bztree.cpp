@@ -135,7 +135,6 @@ int bz_node<Key, Val>::remove(bz_tree<Key, Val> * tree, const Key * key)
 	/* Global variables */
 	uint64_t * meta_arr = rec_meta_arr();
 	uint32_t pos;
-	bool found;
 
 	/* check Frozen */
 	uint64_t status_rd = pmwcas_read(&status_);
@@ -143,45 +142,38 @@ int bz_node<Key, Val>::remove(bz_tree<Key, Val> * tree, const Key * key)
 	if (is_frozen(status_rd))
 		return EFROZEN;
 
-	/* 二分查找有序键值部分 */
-	found = find_key_sorted(key, pos);
+	/* 查找目标键值 */
+	bool useless;
+	if (!find_key_sorted(key, pos) && !find_key_unsorted(key, status_rd, 0, pos, useless))
+		return ENOTFOUND;
 
-	/* 查找无序部分是否有key */
-	if (!found) {
-		bool useless;
-		found = find_key_unsorted(key, status_rd, 0, pos, useless);
-	}
+	while (true)
+	{
+		status_rd = pmwcas_read(&status_);
+		if (is_frozen(status_rd))
+			return EFROZEN;
 
-	if (found) {
-		while (true)
-		{
-			status_rd = pmwcas_read(&status_);
-			if (is_frozen(status_rd))
-				return EFROZEN;
-
-			uint64_t meta_rd = pmwcas_read(&meta_arr[pos]);
-			if (!is_visiable(meta_rd)) {
-				/* 遭遇其他线程的竞争删除 */
-				return ENOTFOUND;
-			}
-
-			/* 增加delete size */
-			uint64_t status_new = status_del(status_rd, get_total_length(meta_rd));
-
-			/* unset visible，offset=0*/
-			uint64_t meta_new = meta_vis_off(meta_rd, false, 0);
-
-			/* 2-word PMwCAS */
-			if (pack_pmwcas(&tree->pool_, {
-				{ &status_, status_rd, status_new },
-				{ &meta_arr[pos], meta_rd, meta_new }
-				}))
-				break;
-			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		uint64_t meta_rd = pmwcas_read(&meta_arr[pos]);
+		if (!is_visiable(meta_rd)) {
+			/* 遭遇其他线程的竞争删除 */
+			return ENOTFOUND;
 		}
-		return 0;
+
+		/* 增加delete size */
+		uint64_t status_new = status_del(status_rd, get_total_length(meta_rd));
+
+		/* unset visible，offset=0*/
+		uint64_t meta_new = meta_vis_off(meta_rd, false, 0);
+
+		/* 2-word PMwCAS */
+		if (pack_pmwcas(&tree->pool_, {
+			{ &status_, status_rd, status_new },
+			{ &meta_arr[pos], meta_rd, meta_new }
+			}))
+			break;
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
-	return ENOTFOUND;
+	return 0;
 }
 /*
 update
@@ -321,6 +313,25 @@ read
 2) linear scan on unsorted keys
 3) return the record found
 */
+template<typename Key, typename Val>
+int bz_node<Key, Val>::read(bz_tree<Key, Val> * tree, const Key * key, Val * val, uint32_t max_val_size)
+{
+	/* Global variables */
+	uint32_t pos;
+
+	/* 查找目标键值 */
+	uint64_t status_rd = pmwcas_read(&status_);
+	bool useless;
+	if (!find_key_sorted(key, pos) && !find_key_unsorted(key, status_rd, 0, pos, useless))
+		return ENOTFOUND;
+	
+	uint64_t * meta_arr = rec_meta_arr();
+	if (get_total_length(meta_arr[pos]) - get_key_length(meta_arr[pos]) > max_val_size)
+		return ENOSPACE;
+	
+	copy_value(val, get_value(meta_arr[pos]));
+	return 0;
+}
 
 /*
 range scan: [beg_key, end_key)
@@ -643,12 +654,16 @@ Val * bz_node<Key, Val>::get_value(uint64_t meta) {
 template<typename Key, typename Val>
 void bz_node<Key, Val>::set_value(uint32_t offset, const Val * val) {
 	Val * addr = (Val *)((char *)this + offset);
-	if (typeid(Val) == typeid(char))
-		strcpy((char*)addr, (char*)val);
-	else
-		*addr = *val;
+	copy_value(addr, val);
 }
-
+template<typename Key, typename Val>
+void bz_node<Key, Val>::copy_value(Val * dst, const Val * src)
+{
+	if (typeid(Val) == typeid(char))
+		strcpy((char*)dst, (char*)src);
+	else
+		*dst = *src;
+}
 /* 键值比较函数 */
 template<typename Key, typename Val>
 int bz_node<Key, Val>::key_cmp(uint64_t meta_entry, const Key * key) {
