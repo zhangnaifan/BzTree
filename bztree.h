@@ -44,6 +44,8 @@ struct bz_node
 	int remove(bz_tree<Key, Val> * tree, const Key * key);
 	int update(bz_tree<Key, Val> * tree, const Key * key, const Val * val, uint32_t key_size, uint32_t total_size, uint32_t alloc_epoch);
 	int   read(bz_tree<Key, Val> * tree, const Key * key, Val * val, uint32_t max_val_size);
+	int upsert(bz_tree<Key, Val> * tree, const Key * key, const Val * val, uint32_t key_size, uint32_t total_size, uint32_t alloc_epoch);
+
 };
 
 /* BzTree */

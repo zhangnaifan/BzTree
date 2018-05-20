@@ -8,4 +8,5 @@ const int EUNIKEY = 5;
 const int EALLOCSIZE = 6;
 const int ENOTFOUND = 7;
 const int ENOSPACE = 8;
+const int ERACE = 9;
 #endif // !BZERRORNO_H

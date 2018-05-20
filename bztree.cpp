@@ -290,7 +290,7 @@ int bz_node<Key, Val>::update(bz_tree<Key, Val> * tree, const Key * key, const V
 				&& CAS(&status_, status_new, status_rd) != status_rd);
 			if (is_frozen(status_rd))
 				return EFROZEN;
-			return EUNIKEY;
+			return ERACE;
 		}
 		uint64_t status_new = status_del(status_rd, get_total_length(meta_del));
 		uint64_t meta_del_new = meta_vis_off(meta_del, false, 0);
@@ -330,6 +330,126 @@ int bz_node<Key, Val>::read(bz_tree<Key, Val> * tree, const Key * key, Val * val
 		return ENOSPACE;
 	
 	copy_value(val, get_value(meta_arr[pos]));
+	return 0;
+}
+
+/* 查找key，存在则后续执行update，否则后续执行insert */
+/* Upsert */
+template<typename Key, typename Val>
+int bz_node<Key, Val>::upsert(bz_tree<Key, Val> * tree, const Key * key, const Val * val, uint32_t key_size, uint32_t total_size, uint32_t alloc_epoch)
+{
+	/* Global variables */
+	uint64_t * meta_arr = rec_meta_arr();
+	uint32_t node_sz = get_node_size(length_);
+	uint32_t sorted_cnt = get_sorted_count(length_);
+	bool recheck = false, found = false;
+	uint64_t meta_new;
+	uint32_t rec_cnt, blk_sz;
+
+	/* not Frozen */
+	uint64_t status_rd = pmwcas_read(&status_);
+	if (is_frozen(status_rd))
+		return EFROZEN;
+
+	/* 查找目标键值的位置 */
+	uint32_t del_pos;
+	if (find_key_sorted(key, del_pos)
+		|| find_key_unsorted(key, status_rd, alloc_epoch, del_pos, recheck))
+		found = true;
+
+	while (true)
+	{
+		status_rd = pmwcas_read(&status_);
+		if (is_frozen(status_rd))
+			return EFROZEN;
+		rec_cnt = get_record_count(status_rd);
+		blk_sz = get_block_size(status_rd);
+
+		/* 可容纳 */
+		if (blk_sz + total_size + sizeof(uint64_t) * (1 + rec_cnt) + sizeof(*this) > node_sz)
+			return EALLOCSIZE;
+
+		/* 增加record count和block size */
+		uint64_t status_new = status_add_rec_blk(status_rd, total_size);
+
+		/* 设置offset为alloc_epoch, unset visiable bit */
+		uint64_t meta_rd = pmwcas_read(&meta_arr[rec_cnt]);
+		meta_new = meta_vis_off(meta_rd, false, alloc_epoch);
+
+		/* 2-word PMwCAS */
+		if (pack_pmwcas(&tree->pool_, {
+			{ &status_, status_rd, status_new },
+			{ &meta_arr[rec_cnt], meta_rd, meta_new }
+			}))
+			break;
+		recheck = true;
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+
+	/* copy key and val */
+	uint32_t new_offset = node_sz - blk_sz - total_size - 1;
+	copy_data(new_offset, key, val, key_size, total_size);
+
+	if (recheck) {
+		uint32_t beg_pos = found ? del_pos + 1 : sorted_cnt;
+		int ret = rescan_unsorted(beg_pos, rec_cnt, key, total_size, alloc_epoch);
+		if (ret)
+			return ret;
+	}
+
+	/* set visiable; real offset; key_len and tot_len */
+	uint64_t meta_new_plus = meta_vis_off_klen_tlen(meta_new, true, new_offset, key_size, total_size);
+
+	while (true)
+	{
+		status_rd = pmwcas_read(&status_);
+		if (is_frozen(status_rd)) {
+			/* frozen set */
+			set_offset(meta_arr[rec_cnt], 0);
+			persist(&meta_arr[rec_cnt], sizeof(uint64_t));
+			return EFROZEN;
+		}
+
+		if (found) {
+			/* 执行更新操作 */
+			uint64_t meta_del = pmwcas_read(&meta_arr[del_pos]);
+			if (!is_visiable(meta_del)) {
+				uint64_t status_new;
+				/* 遭遇竞争删除或更新，放弃保留的空间 */
+				set_offset(meta_arr[rec_cnt], 0);
+				persist(&meta_arr[rec_cnt], sizeof(uint64_t));
+				do {
+					status_rd = pmwcas_read(&status_);
+					status_new = status_del(status_rd, total_size);
+				} while (!is_frozen(status_rd)
+					&& CAS(&status_, status_new, status_rd) != status_rd);
+				if (is_frozen(status_rd))
+					return EFROZEN;
+				return ERACE;
+			}
+			uint64_t status_new = status_del(status_rd, get_total_length(meta_del));
+			uint64_t meta_del_new = meta_vis_off(meta_del, false, 0);
+			/* 3-word PMwCAS */
+			if (pack_pmwcas(&tree->pool_, {
+				{ &status_, status_rd, status_new },
+				{ &meta_arr[rec_cnt], meta_new, meta_new_plus },
+				{ &meta_arr[del_pos], meta_del, meta_del_new }
+				}))
+				break;
+		}
+		else
+		{
+			/* 执行插入操作 */
+			/* 2-word PMwCAS */
+			if (pack_pmwcas(&tree->pool_, {
+				{ &status_, status_rd, status_rd },
+				{ &meta_arr[rec_cnt], meta_new, meta_new_plus }
+				}))
+				break;
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+
 	return 0;
 }
 
