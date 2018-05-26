@@ -9,7 +9,7 @@
 #include <unordered_map>
 #include <atomic>
 #include "bztree.h"
-#include "bztree.cpp"
+#include "bzerrno.h"
 using namespace std;
 
 template<typename T>
@@ -28,7 +28,9 @@ struct bz_test {
 		int ret = top_obj->tree.root_->insert(&top_obj->tree, &k, &v, key_sz, key_sz + 8, 0x1);
 	}
 
-	void print_log(const char * action, T * k, int ret = -1) {
+	void print_log(const char * action, T * k, int ret = -1, bool pr = false) {
+		if (!pr)
+			return;
 		while (flag.exchange(true)) {
 			continue;
 		}
@@ -138,7 +140,7 @@ struct bz_test {
 		bool read = false,
 		bool upsert = false,
 		int sz = 36, 
-		int concurrent = 8,
+		int concurrent = 16,
 		int node_sz = 600 * 36) 
 	{
 		const char * fname = "test.pool";

@@ -2,6 +2,7 @@
 #include "bzconfig.h"
 #include "bzerrno.h"
 #include <thread>
+#include <atomic>
 
 std::atomic<bool> gc_alive = false;
 

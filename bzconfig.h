@@ -2,6 +2,7 @@
 #define BZCONFIG_H
 
 #define IS_PMEM		
+#define BZ_DEBUG
 
 #define DESCRIPTOR_POOL_SIZE	512
 #define WORD_DESCRIPTOR_SIZE	4
