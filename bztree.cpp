@@ -1,7 +1,6 @@
 #include <thread>
 #include <vector>
 #include <tuple>
-#include <memory>
 
 #include "bztree.h"
 #include "bzerrno.h"
@@ -62,9 +61,6 @@ int bz_node<Key, Val>::insert(bz_tree<Key, Val> * tree, const Key * key, const V
 
 	while (true)
 	{
-		status_rd = pmwcas_read(&status_);
-		if (is_frozen(status_rd))
-			return EFROZEN;
 		rec_cnt = get_record_count(status_rd);
 		blk_sz = get_block_size(status_rd);
 
@@ -87,6 +83,9 @@ int bz_node<Key, Val>::insert(bz_tree<Key, Val> * tree, const Key * key, const V
 			break;
 		recheck = true;
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		status_rd = pmwcas_read(&status_);
+		if (is_frozen(status_rd))
+			return EFROZEN;
 	}
 
 	/* copy key and val */
@@ -150,10 +149,6 @@ int bz_node<Key, Val>::remove(bz_tree<Key, Val> * tree, const Key * key)
 
 	while (true)
 	{
-		status_rd = pmwcas_read(&status_);
-		if (is_frozen(status_rd))
-			return EFROZEN;
-
 		uint64_t meta_rd = pmwcas_read(&meta_arr[pos]);
 		if (!is_visiable(meta_rd)) {
 			/* 遭遇其他线程的竞争删除 */
@@ -173,6 +168,9 @@ int bz_node<Key, Val>::remove(bz_tree<Key, Val> * tree, const Key * key)
 			}))
 			break;
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		status_rd = pmwcas_read(&status_);
+		if (is_frozen(status_rd))
+			return EFROZEN;
 	}
 	return 0;
 }
@@ -226,12 +224,9 @@ int bz_node<Key, Val>::update(bz_tree<Key, Val> * tree, const Key * key, const V
 	if (!find_key_sorted(key, del_pos) 
 		&& !find_key_unsorted(key, status_rd, alloc_epoch, del_pos, recheck))
 		return ENOTFOUND;
-	
+
 	while (true)
 	{
-		status_rd = pmwcas_read(&status_);
-		if (is_frozen(status_rd))
-			return EFROZEN;
 		rec_cnt = get_record_count(status_rd);
 		blk_sz = get_block_size(status_rd);
 
@@ -254,6 +249,9 @@ int bz_node<Key, Val>::update(bz_tree<Key, Val> * tree, const Key * key, const V
 			break;
 		recheck = true;
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		status_rd = pmwcas_read(&status_);
+		if (is_frozen(status_rd))
+			return EFROZEN;
 	}
 
 	/* copy key and val */
@@ -304,7 +302,6 @@ int bz_node<Key, Val>::update(bz_tree<Key, Val> * tree, const Key * key, const V
 			break;
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
-
 	return 0;
 }
 
@@ -327,10 +324,11 @@ int bz_node<Key, Val>::read(bz_tree<Key, Val> * tree, const Key * key, Val * val
 		return ENOTFOUND;
 	
 	uint64_t * meta_arr = rec_meta_arr();
-	if (get_total_length(meta_arr[pos]) - get_key_length(meta_arr[pos]) > max_val_size)
+	uint64_t meta_rd = pmwcas_read(&meta_arr[pos]);
+	if (get_total_length(meta_rd) - get_key_length(meta_rd) > max_val_size)
 		return ENOSPACE;
 	
-	copy_value(val, get_value(meta_arr[pos]));
+	copy_value(val, get_value(meta_rd));
 	return 0;
 }
 
@@ -360,9 +358,6 @@ int bz_node<Key, Val>::upsert(bz_tree<Key, Val> * tree, const Key * key, const V
 
 	while (true)
 	{
-		status_rd = pmwcas_read(&status_);
-		if (is_frozen(status_rd))
-			return EFROZEN;
 		rec_cnt = get_record_count(status_rd);
 		blk_sz = get_block_size(status_rd);
 
@@ -385,6 +380,9 @@ int bz_node<Key, Val>::upsert(bz_tree<Key, Val> * tree, const Key * key, const V
 			break;
 		recheck = true;
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		status_rd = pmwcas_read(&status_);
+		if (is_frozen(status_rd))
+			return EFROZEN;
 	}
 
 	/* copy key and val */
@@ -470,6 +468,7 @@ void bz_node<Key, Val>::copy_data(uint64_t meta_rd, std::vector<std::pair<std::s
 	shared_ptr<Key> sp_key;
 	if (typeid(Key) == typeid(char)) {
 		sp_key = shared_ptr<Key>(new Key[get_key_length(meta_rd)], [](Key *p) {delete[] p; });
+		copy_key(sp_key.get(), get_key(meta_rd));
 	}
 	else {
 		sp_key = make_shared<Key>(*get_key(meta_rd));
@@ -478,6 +477,7 @@ void bz_node<Key, Val>::copy_data(uint64_t meta_rd, std::vector<std::pair<std::s
 	if (typeid(Val) == typeid(char)) {
 		uint32_t val_sz = get_total_length(meta_rd) - get_key_length(meta_rd);
 		sp_val = shared_ptr<Val>(new Val[val_sz], [](Val *p) {delete[] p; });
+		copy_value(sp_val.get(), get_value(meta_rd));
 	}
 	else {
 		sp_val = make_shared<Val>(*get_value(meta_rd));
@@ -810,10 +810,14 @@ Key * bz_node<Key, Val>::get_key(uint64_t meta) {
 template<typename Key, typename Val>
 void bz_node<Key, Val>::set_key(uint32_t offset, const Key *key) {
 	Key * addr = (Key *)((char *)this + offset);
+	copy_key(addr, key);
+}
+template<typename Key, typename Val>
+void bz_node<Key, Val>::copy_key(Key * dst, const Key * src) {
 	if (typeid(Key) == typeid(char))
-		strcpy((char *)addr, (char*)key);
+		strcpy_s((char *)dst, strlen((char*)src) + 1, (char*)src);
 	else
-		*addr = *key;
+		*dst = *src;
 }
 template<typename Key, typename Val>
 Val * bz_node<Key, Val>::get_value(uint64_t meta) {
@@ -831,7 +835,7 @@ template<typename Key, typename Val>
 void bz_node<Key, Val>::copy_value(Val * dst, const Val * src)
 {
 	if (typeid(Val) == typeid(char))
-		strcpy((char*)dst, (char*)src);
+		strcpy_s((char*)dst, strlen((char*)src) + 1, (char*)src);
 	else
 		*dst = *src;
 }

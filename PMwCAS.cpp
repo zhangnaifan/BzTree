@@ -2,9 +2,6 @@
 #include "bzconfig.h"
 #include "bzerrno.h"
 #include <thread>
-#include <atomic>
-
-#include <assert.h>
 
 std::atomic<bool> gc_alive = false;
 
@@ -245,44 +242,27 @@ inline uint64_t install_mdesc(wdesc_t wdesc)
 bool pmwcas_commit(mdesc_t mdesc)
 {
 	uint64_t status = ST_SUCCESS;
-	for (off_t i = 0; status == ST_SUCCESS && i < mdesc->count; ++i) 
-	{
+	for (off_t i = 0; status == ST_SUCCESS && i < mdesc->count; ++i) {
 		wdesc_t wdesc = mdesc->wdescs + i;
+		uint64_t r;
 		while (true) {
-			/*
-			* try to install a pointer to mdesc for tha target word
-			*/
-			uint64_t r = install_mdesc(wdesc);
-			if (r == wdesc->expect || (r & ADDR_MASK) == mdesc.rel())
-			{
-				/*
-				* successful CAS install
-				* or has been installed by another thread
-				*/
+			/* try to install a pointer to mdesc for tha target word */
+			r = install_mdesc(wdesc);
+			if (r == wdesc->expect || (r & ADDR_MASK) == mdesc.rel()) {
+				/* successful CAS install or has been installed by another thread */
 				break;
 			}
-			if (is_MwCAS(r))
-			{
-				/*
-				* read a multi word decriptor
-				* help it finish
-				*/
-				if (is_dirty(r))
-				{
-					/*
-					* make sure what we read is persistent
-					*/
+			if (is_MwCAS(r)) {
+				/* read a multi word decriptor help it finish */
+				if (is_dirty(r)) {
+					/* make sure what we read is persistent */
 					persist_clear(wdesc->addr.abs(), r);
 				}
 				pmwcas_commit(mdesc_t(r & ADDR_MASK));
-				/*
-				* retry install
-				*/
+				/* retry install */
 				continue;
 			}
-			/*
-			* otherwise, CAS failed, so the whole PMwCAS fails
-			*/
+			/* otherwise, CAS failed, so the whole PMwCAS fails */
 			status = ST_FAILED;
 			break;
 		}
@@ -292,36 +272,26 @@ bool pmwcas_commit(mdesc_t mdesc)
 	/*
 	* make sure that every target word is installed
 	*/
-	if (status == ST_SUCCESS)
-	{
-		for (off_t i = 0; i < mdesc->count; ++i)
-		{
+	if (status == ST_SUCCESS) {
+		for (off_t i = 0; i < mdesc->count; ++i) {
 			wdesc_t wdesc = mdesc->wdescs + i;
 			persist_clear(wdesc->addr.abs(), mdesc_ptr);
 		}
 	}
 
-	/*
-	* finalize MwCAS status
-	*/
+	/* finalize MwCAS status */
 	CAS(&mdesc->status, status | DIRTY_BIT, ST_UNDECIDED);
 	persist_clear(&mdesc->status, mdesc->status);
 
-	/*
-	* install the final value for each word
-	*/
-	for (off_t i = 0; i < mdesc->count; ++i)
-	{
+	/* install the final value for each word */
+	for (off_t i = 0; i < mdesc->count; ++i) {
 		wdesc_t wdesc = mdesc->wdescs + i;
 		uint64_t val = 
 			(mdesc->status == ST_SUCCESS ? wdesc->new_val : wdesc->expect) | DIRTY_BIT;
 		uint64_t r = CAS(wdesc->addr.abs(), val, mdesc_ptr);
 		
-		/*
-		* if the dirty bit has been unset
-		*/
-		if (r == (mdesc_ptr & ~DIRTY_BIT))
-		{
+		/* if the dirty bit has been unset */
+		if (r == (mdesc_ptr & ~DIRTY_BIT)) {
 			CAS(wdesc->addr.abs(), val, mdesc_ptr & ~DIRTY_BIT);
 		}
 		persist_clear(wdesc->addr.abs(), val);

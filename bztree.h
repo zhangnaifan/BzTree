@@ -20,6 +20,7 @@ struct bz_node
 	/* K-V getter and setter */
 	Key * get_key(uint64_t meta);
 	void set_key(uint32_t offset, const Key * key);
+	void copy_key(Key * dst, const Key * src);
 	Val * get_value(uint64_t meta);
 	void set_value(uint32_t offset, const Val * val);
 	void copy_value(Val * dst, const Val * src);
@@ -39,7 +40,7 @@ struct bz_node
 	void copy_data(uint32_t new_offset, const Key * key, const Val * val, uint32_t key_size, uint32_t total_size);
 	void copy_data(uint64_t meta_rd, std::vector<std::pair<std::shared_ptr<Key>, std::shared_ptr<Val>>> & res);
 	int rescan_unsorted(uint32_t beg_pos, uint32_t rec_cnt, const Key * key, uint32_t total_size, uint32_t alloc_epoch);
-	
+
 	/* 执行叶节点的数据项操作 */
 	int insert(bz_tree<Key, Val> * tree, const Key * key, const Val * val, uint32_t key_size, uint32_t total_size, uint32_t alloc_epoch);
 	int remove(bz_tree<Key, Val> * tree, const Key * key);
@@ -52,8 +53,8 @@ struct bz_node
 /* BzTree */
 template<typename Key, typename Val>
 struct bz_tree {
-	PMEMobjpool *		pop_;
-	pmwcas_pool			pool_;
+	PMEMobjpool *				pop_;
+	pmwcas_pool					pool_;
 	rel_ptr<bz_node<Key, Val>>	root_;
 	
 	void first_use();

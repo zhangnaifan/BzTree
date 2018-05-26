@@ -13,9 +13,9 @@
 #define persit		pmem_msync
 #endif // IS_PMEM
 
-#define RDCSS_BIT		((uint64_t)1 << 63)
-#define MwCAS_BIT		((uint64_t)1 << 62)
-#define DIRTY_BIT		((uint64_t)1 << 61)
+#define RDCSS_BIT		0x8000000000000000
+#define MwCAS_BIT		0x4000000000000000
+#define DIRTY_BIT		0x2000000000000000
 #define ADDR_MASK		0xffffffffffff
 
 #define ST_UNDECIDED	0
