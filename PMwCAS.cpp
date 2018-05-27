@@ -113,13 +113,15 @@ void pmwcas_reclaim(gc_entry_t *entry, void *arg)
 			uint64_t val = done ? wdesc->new_val : wdesc->expect;
 
 			/* 根据回收规则回收 */
-			if (wdesc->recycle_func == 1) {
+			if (wdesc->recycle_func == RELEASE_NEW_ON_FAILED
+				|| wdesc->recycle_func == RELEASE_SWAP_PTR) {
 				/* 未成功时回收new */
 				if (!done && wdesc->new_val) {
 					pmwcas_word_recycle(rel_ptr<uint64_t>(wdesc->new_val));
 				}
 			}
-			else if (wdesc->recycle_func == 2 && done && wdesc->expect) {
+			else if ((wdesc->recycle_func == RELEASE_EXP_ON_SUCCESS || wdesc->recycle_func == RELEASE_SWAP_PTR)
+				&& done && wdesc->expect) {
 				/* 成功时回收expect */
 				pmwcas_word_recycle(rel_ptr<uint64_t>(wdesc->expect));
 			}

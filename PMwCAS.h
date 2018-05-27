@@ -25,6 +25,7 @@
 
 #define RELEASE_NEW_ON_FAILED	1
 #define RELEASE_EXP_ON_SUCCESS	2
+#define RELEASE_SWAP_PTR		3 //release new on failed and release expect on success
 
 #define EXCHANGE		InterlockedExchange
 #define CAS				InterlockedCompareExchange

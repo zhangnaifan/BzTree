@@ -51,12 +51,12 @@ struct bz_test {
 		flag.store(false);
 	}
 	void pmem_worker(pmem_layout * top_obj, T * k, rel_ptr<T> *v,
-		bool write, bool dele, bool update, bool read, bool upsert) 
+		bool write, bool dele, bool update, bool read, bool upsert, bool consolidate) 
 	{
 		uint32_t key_sz = typeid(T) == typeid(char) ? (uint32_t)strlen((char*)k) + 1 : sizeof(T);
 		if (write) {
 			print_log("INSERT", k);
-			int ret = top_obj->tree.root_->insert(&top_obj->tree, k, v, key_sz, key_sz + 8, 0x1);
+			int ret = top_obj->tree.insert(k, v, key_sz, key_sz + 8);
 			assert(!ret || ret == EUNIKEY);
 			print_log("INSERT", k, ret);
 		}
@@ -81,22 +81,26 @@ struct bz_test {
 			int ret = top_obj->tree.root_->read(&top_obj->tree, k, &data, 8);
 			assert(ret == ENOTFOUND || !ret);
 		}
+		if (consolidate) {
+			int ret = top_obj->tree.root_->leaf_consolidate(&top_obj->tree);
+			assert(!ret);
+		}
 	}
 	void show_mem(pmem_layout * top_obj, int sz)
 	{
-		auto &root = *top_obj->tree.root_;
-		uint64_t * meta_arr = root.rec_meta_arr();
-		int rec_cnt = get_record_count(root.status_);
-		cout << setfill('0') << setw(16) << hex << root.status_ << endl;
-		cout << setfill('0') << setw(16) << hex << root.length_ << endl;
+		auto root = &(*top_obj->tree.root_);
+		uint64_t * meta_arr = root->rec_meta_arr();
+		int rec_cnt = get_record_count(root->status_);
+		cout << setfill('0') << setw(16) << hex << root->status_ << endl;
+		cout << setfill('0') << setw(16) << hex << root->length_ << endl;
 		if (typeid(T) == typeid(char)) {
 			unordered_map<string, int> s;
 			for (int i = 0; i < rec_cnt; ++i) {
 				cout << setfill('0') << setw(16) << hex << meta_arr[i];
 				if (is_visiable(meta_arr[i])) {
-					cout << " : " << (char*)root.get_key(meta_arr[i])
-						<< ", " << (char*)(*root.get_value(meta_arr[i])).abs() << endl;
-					string ke = (char*)root.get_key(meta_arr[i]);
+					cout << " : " << (char*)root->get_key(meta_arr[i])
+						<< ", " << (char*)(*root->get_value(meta_arr[i])).abs() << endl;
+					string ke = (char*)root->get_key(meta_arr[i]);
 					if (s.find(ke) != s.end())
 						assert(0);
 					s[ke] = 0;
@@ -110,11 +114,13 @@ struct bz_test {
 			for (int i = 0; i < rec_cnt; ++i) {
 				cout << setfill('0') << setw(16) << hex << meta_arr[i];
 				if (is_visiable(meta_arr[i])) {
-					cout << dec << " : " << *root.get_key(meta_arr[i])
-						<< ", " << **root.get_value(meta_arr[i]) << endl;
-					T ke = *root.get_key(meta_arr[i]);
+					auto k = *root->get_key(meta_arr[i]);
+					auto v = **root->get_value(meta_arr[i]);
+					cout << dec << " : " << k
+						<< ", " << v << endl;
+					T ke = *root->get_key(meta_arr[i]);
 					if (s.find(ke) != s.end())
-						assert(0);
+						assert(1);
 					s[ke] = 0;
 				}
 				else
@@ -139,9 +145,11 @@ struct bz_test {
 		bool update = false,
 		bool read = false,
 		bool upsert = false,
-		int sz = 36, 
+		bool consolidate = false,
+		int sz = 32,
 		int concurrent = 16,
-		int node_sz = 600 * 36) 
+		bool recovery = true,
+		int node_sz = NODE_ALLOC_SIZE) 
 	{
 		const char * fname = "test.pool";
 		PMEMobjpool * pop;
@@ -159,7 +167,6 @@ struct bz_test {
 		auto top_obj = (pmem_layout *)pmemobj_direct(top_oid);
 		assert(!OID_IS_NULL(top_oid) && top_obj);
 		auto &tree = top_obj->tree;
-		rel_ptr<T>::set_base(top_oid);
 
 		if (first) {
 			tree.first_use();
@@ -170,8 +177,11 @@ struct bz_test {
 					top_obj->data[i] = 10 * i;
 		}
 		tree.init(pop, top_oid);
+		if (recovery) {
+			tree.recovery();
+		}
 		if (first) {
-			int ret = tree.alloc_node(&tree.root_, tree.root_, node_sz);
+			int ret = tree.new_root();
 			assert(!ret && !tree.root_.is_null() && node_sz == get_node_size(tree.root_->length_));
 			//mem_init(top_obj);
 		}
@@ -194,7 +204,7 @@ struct bz_test {
 					this, top_obj, 
 					typeid(T) == typeid(char) ? (T*)char_keys[index] : &keys[index], 
 					&vals[index],
-					write, dele, update, read, upsert);
+					write, dele, update, read, upsert, consolidate);
 			}
 		for (int i = 0; i < sz * concurrent; ++i) {
 			t[i].join();
@@ -208,7 +218,7 @@ struct bz_test {
 		if (typeid(T) == typeid(char))
 			range_scan(top_obj, (T*)char_keys[0], (T*)char_keys[9]);
 		else
-			range_scan(top_obj, &keys[0], &keys[sz - 1]);
+			range_scan(top_obj, &keys[0], &keys[63]);
 
 		for (int i = 0; i < 64; ++i) {
 			delete[] char_keys[i];

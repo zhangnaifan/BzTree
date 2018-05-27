@@ -10,4 +10,9 @@
 
 #define GC_WAIT_MS				10
 
+#define NODE_CONSOLIDATE_SIZE	1024
+#define NODE_SPLIT_SIZE			4096
+#define NODE_MERGE_SIZE			2048
+#define NODE_ALLOC_SIZE			5120
+
 #endif // !BZCONFIG_H

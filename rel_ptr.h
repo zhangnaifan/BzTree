@@ -1,10 +1,16 @@
 #ifndef REL_PTR_H
 #define REL_PTR_H
 
+#include <exception>
+
 /* relative pointer */
 template<typename T>
 class rel_ptr
 {
+#ifdef BZ_DEBUG
+public:
+#endif // BZ_DEBUG
+
 	/* base address initialized in the start */
 	static UCHAR * base_address;
 	static PMEMoid base_oid;
@@ -23,8 +29,16 @@ public:
 	PMEMoid oid() { return { base_oid.pool_uuid_lo, base_oid.off + off }; }
 
 	/* basic pointer usage */
-	T& operator *() { return *(T*)(base_address + off); }
-	T* operator ->() { return (T*)(base_address + off); }
+	T& operator *() {
+		if (!off)
+			throw std::exception("NULL_PTR_ERROR");
+		return *(T*)(base_address + off);
+	}
+	T* operator ->() {
+		if (!off)
+			throw std::exception("NULL_PTR_ERROR");
+		return (T*)(base_address + off); 
+	}
 
 	/* return absolute or relative address */
 	uint64_t * abs() { return (uint64_t*)(base_address + off); }

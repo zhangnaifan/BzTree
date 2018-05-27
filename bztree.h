@@ -4,6 +4,7 @@
 #include <thread>
 #include <vector>
 #include <tuple>
+#include <algorithm>
 
 #include "bzerrno.h"
 #include "PMwCAS.h"
@@ -11,18 +12,31 @@
 #include <mutex>
 #include <fstream>
 
+#define BZ_SPLIT		1
+#define BZ_MERGE		2
+#define BZ_CONSOLIDATE	3
+
 template<typename Key, typename Val>
 struct bz_tree;
 
+#ifdef BZ_DEBUG
 std::mutex mylock;
 std::fstream fs("log.txt", std::ios::app);
+#endif // BZ_DEBUG
 
+struct bz_node_fake {};
+POBJ_LAYOUT_BEGIN(layout_name);
+POBJ_LAYOUT_TOID(layout_name, struct bz_node_fake);
+POBJ_LAYOUT_END(layout_name);
 
 /* BzTree节点头部 */
 template<typename Key, typename Val>
 struct bz_node
 {
-	/* status 3: PMwCAS control, 1: frozen, 16: record count, 22: block size, 22: delete size */
+	/* parent entry value that points to this node */
+	rel_ptr<rel_ptr<bz_node<Key, Val>>> parent_ptr;
+
+	/* status 3: PMwCAS control, 1: frozen, 16: record count, 22: block size, 21: delete size, 1: is_leaf */
 	uint64_t status_;
 	/* length 32: node size, 32: sorted count */
 	uint64_t length_;
@@ -39,6 +53,7 @@ struct bz_node
 	
 	/* 键值比较函数 */
 	int key_cmp(uint64_t meta_1, const Key * key);
+	bool key_cmp_meta(uint64_t meta_1, uint64_t meta_2);
 	
 	/* 辅助函数 */
 	int binary_search(uint64_t * meta_arr, int size, const Key * key);
@@ -53,6 +68,9 @@ struct bz_node
 	void copy_data(uint64_t meta_rd, std::vector<std::pair<std::shared_ptr<Key>, std::shared_ptr<Val>>> & res);
 	int rescan_unsorted(uint32_t beg_pos, uint32_t rec_cnt, const Key * key, uint32_t total_size, uint32_t alloc_epoch);
 
+	int triger_consolidate();
+	int leaf_consolidate(bz_tree<Key, Val> * tree);
+
 	/* 执行叶节点的数据项操作 */
 	int insert(bz_tree<Key, Val> * tree, const Key * key, const Val * val, uint32_t key_size, uint32_t total_size, uint32_t alloc_epoch);
 	int remove(bz_tree<Key, Val> * tree, const Key * key);
@@ -62,7 +80,7 @@ struct bz_node
 	std::vector<std::pair<std::shared_ptr<Key>, std::shared_ptr<Val>>> range_scan(const Key * beg_key, const Key * end_key);
 
 #ifdef BZ_DEBUG
-	void print_log(const char * action, const Key * k, int ret = -1, bool pr = false);
+	void print_log(const char * action, const Key * k, int ret = -1, bool pr = true);
 
 #endif // BZ_DEBUG
 };
@@ -73,17 +91,175 @@ struct bz_tree {
 	PMEMobjpool *				pop_;
 	pmwcas_pool					pool_;
 	rel_ptr<bz_node<Key, Val>>	root_;
-	
-	void first_use();
+	uint32_t					epoch_;
+
+	void first_use(uint32_t node_size = 1024 * 1024 * 8);
 	int init(PMEMobjpool * pop, PMEMoid base_oid);
+	void recovery();
 	void finish();
-	int alloc_node(rel_ptr<rel_ptr<bz_node<Key, Val>>> addr, rel_ptr<bz_node<Key, Val>> expect, size_t size);
+	int new_root();
+	int insert(const Key * key, const Val * val, uint32_t key_size, uint32_t total_size);
+
+	/* 辅助函数 */
+	int leaf_insert(bz_node<Key, Val> & node, const Key * key, const Val * val, uint32_t key_size, uint32_t total_size);
 };
+
+
+/*
+consolidate:
+
+trigger by
+either free space too small or deleted space too large
+
+1) single-word PMwCAS on status => frozen bit
+2) scan all valid records(visiable and not deleted)
+calculate node size = record size + free space
+2.1) if node size too large, do a split
+2.2) otherwise, allocate a new node N', copy records sorted, init header
+3) use path stack to find Node's parent P
+3.1) if P's frozen, retraverse to locate P
+4) 2-word PMwCAS
+r in P that points to N => N'
+P's status => detect concurrent freeze
+5) N is ready for gc
+6)
+*/
+
+template<typename Key, typename Val>
+int bz_node<Key, Val>::leaf_consolidate(bz_tree<Key, Val> * tree)
+{
+	mdesc_t mdesc = pmwcas_alloc(&tree->pool_, RELEASE_SWAP_PTR);
+	while (mdesc.is_null()) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		mdesc = pmwcas_alloc(&tree->pool_);
+	}
+
+	rel_ptr<rel_ptr<bz_node<Key, Val>>> ptr;
+	if (!parent_ptr.is_null()) {
+		ptr = pmwcas_reserve<bz_node<Key, Val>>(mdesc,
+			parent_ptr, *parent_ptr);
+	}
+	else {
+		rel_ptr<bz_node<Key, Val>> root(pmwcas_read((uint64_t*)&tree->root_));
+		ptr = pmwcas_reserve<bz_node<Key, Val>>(mdesc,
+			&tree->root_, root);
+	}
+
+	TX_BEGIN(tree->pop_) {
+		pmemobj_tx_add_range_direct(ptr.abs(), sizeof(uint64_t));
+		*ptr = pmemobj_tx_alloc(NODE_ALLOC_SIZE, TOID_TYPE_NUM(struct bz_node_fake));
+	} TX_END;
+
+	//初始化节点为0
+	rel_ptr<bz_node<Key, Val>> node = *ptr;
+	memset(node.abs(), 0, sizeof(*this));
+	//拷贝meta并按键值排序
+	uint64_t status_rd = pmwcas_read(&status_);
+	uint32_t rec_cnt = get_record_count(status_rd);
+	uint64_t * new_meta_arr = node->rec_meta_arr();
+	memcpy(new_meta_arr, rec_meta_arr(), rec_cnt * sizeof(uint64_t));
+	std::sort(new_meta_arr, new_meta_arr + rec_cnt, 
+		std::bind(&bz_node<Key, Val>::key_cmp_meta, this, std::placeholders::_1, std::placeholders::_2));
+
+	//计算有效meta数目
+	uint32_t new_rec_cnt = (uint32_t)binary_search(new_meta_arr, rec_cnt, nullptr);
+	//拷贝key-value
+	uint32_t blk_sz = 0;
+	uint32_t node_sz = NODE_ALLOC_SIZE;
+	for (uint32_t i = 0; i < new_rec_cnt; ++i) {
+		const Key * key = get_key(new_meta_arr[i]);
+		const Val * val = get_value(new_meta_arr[i]);
+		uint32_t key_sz = get_key_length(new_meta_arr[i]);
+		uint32_t tot_sz = get_total_length(new_meta_arr[i]);
+		uint32_t new_offset = node_sz - blk_sz - tot_sz - 1;
+		new_meta_arr[i] = meta_vis_off_klen_tlen(0, true, new_offset, key_sz, tot_sz);
+		node->copy_data(new_offset, key, val, key_sz, tot_sz);
+		blk_sz += tot_sz;
+	}
+	memset(new_meta_arr + new_rec_cnt, 0, (rec_cnt - new_rec_cnt) * sizeof(uint64_t));
+
+	//初始化节点头的status和length
+	set_record_count(node->status_, new_rec_cnt);
+	set_block_size(node->status_, blk_sz);
+	if (is_leaf(status_))
+		set_leaf(node->status_);
+	else
+		set_non_leaf(node->status_);
+	set_node_size(node->length_, node_sz);
+	set_sorted_count(node->length_, new_rec_cnt);
+	//持久化
+	persist(node.abs(), node_sz);
+	//执行pmwcas
+	bool ret = pmwcas_commit(mdesc);
+	pmwcas_free(mdesc);
+	return ret ? 0 : ERACE;
+}
+
+template<typename Key, typename Val>
+int bz_tree<Key, Val>::leaf_insert(bz_node<Key, Val> & node, const Key * key, const Val * val, uint32_t key_size, uint32_t total_size)
+{
+	int cs_type;
+	if (cs_type = node.triger_consolidate()) {
+		if (cs_type == BZ_CONSOLIDATE) {
+
+		}
+		else if (cs_type == BZ_SPLIT) {
+
+		}
+		else if (cs_type == BZ_MERGE) {
+
+		}
+	}
+	else {
+		node.insert(this, key, val, key_size, total_size, epoch_);
+	}
+	return 0;
+}
+
+template<typename Key, typename Val>
+int bz_tree<Key, Val>::insert(const Key * key, const Val * val, uint32_t key_size, uint32_t total_size)
+{
+	//TODO: what to do with FROZEN and consolidation
+	rel_ptr<bz_node<Key, Val>> ptr(pmwcas_read((uint64_t*)&root_));
+	if (ptr.is_null())
+		new_root();
+	while (!is_leaf(ptr->status_)) {
+		uint64_t * meta_arr = ptr->rec_meta_arr();
+		uint32_t sorted_cnt = get_sorted_count(ptr->length_);
+		int pos = ptr->binary_search(meta_arr, sorted_cnt, key);
+		ptr = *(ptr->get_value(meta_arr[pos]));
+	}
+	return leaf_insert(*ptr, key, val, key_size, total_size);
+}
+
+
+template<typename Key, typename Val>
+int bz_node<Key, Val>::triger_consolidate()
+{
+	uint64_t status_rd = pmwcas_read(&status_);
+	uint32_t rec_cnt = get_record_count(status_rd);
+	uint32_t blk_sz = get_block_size(status_rd);
+	uint32_t dele_sz = get_delete_size(status_rd);
+	uint32_t node_sz = get_node_size(length_);
+	uint32_t free_sz = node_sz - blk_sz - sizeof(*this) - rec_cnt * sizeof(uint64_t);
+	uint32_t new_node_sz = blk_sz - dele_sz;
+	if (free_sz < NODE_CONSOLIDATE_SIZE) {
+		if (new_node_sz > NODE_SPLIT_SIZE)
+			return BZ_SPLIT;
+		else if (new_node_sz < NODE_MERGE_SIZE)
+			return BZ_MERGE;
+		else
+			return BZ_CONSOLIDATE;
+	}
+	return 0;
+}
+
+
 
 #ifdef BZ_DEBUG
 
 template<typename Key, typename Val>
-void bz_node<Key, Val>::print_log(const char * action, const Key * k, int ret, bool pr) 
+void bz_node<Key, Val>::print_log(const char * action, const Key * k, int ret, bool pr)
 {
 	if (!pr)
 		return;
@@ -106,11 +282,6 @@ void bz_node<Key, Val>::print_log(const char * action, const Key * k, int ret, b
 }
 
 #endif // BZ_DEBUG
-
-struct bz_node_fake {};
-POBJ_LAYOUT_BEGIN(layout_name);
-POBJ_LAYOUT_TOID(layout_name, struct bz_node_fake);
-POBJ_LAYOUT_END(layout_name);
 
 /*
 insert:
@@ -577,28 +748,6 @@ one leaf node at a time
 5) enter new epoch
 6) greater than search the largest key in response array
 */
-template<typename Key, typename Val>
-void bz_node<Key, Val>::copy_data(uint64_t meta_rd, std::vector<std::pair<std::shared_ptr<Key>, std::shared_ptr<Val>>> & res)
-{
-	shared_ptr<Key> sp_key;
-	if (typeid(Key) == typeid(char)) {
-		sp_key = shared_ptr<Key>(new Key[get_key_length(meta_rd)], [](Key *p) {delete[] p; });
-		copy_key(sp_key.get(), get_key(meta_rd));
-	}
-	else {
-		sp_key = make_shared<Key>(*get_key(meta_rd));
-	}
-	shared_ptr<Val> sp_val;
-	if (typeid(Val) == typeid(char)) {
-		uint32_t val_sz = get_total_length(meta_rd) - get_key_length(meta_rd);
-		sp_val = shared_ptr<Val>(new Val[val_sz], [](Val *p) {delete[] p; });
-		copy_value(sp_val.get(), get_value(meta_rd));
-	}
-	else {
-		sp_val = make_shared<Val>(*get_value(meta_rd));
-	}
-	res.emplace_back(make_pair(sp_key, sp_val));
-}
 
 template<typename Key, typename Val>
 std::vector<std::pair<std::shared_ptr<Key>, std::shared_ptr<Val>>>
@@ -630,33 +779,15 @@ bz_node<Key, Val>::range_scan(const Key * beg_key, const Key * end_key)
 	return res;
 }
 
-/*
-consolidate:
-
-trigger by
-either free space too small or deleted space too large
-
-1) single-word PMwCAS on status => frozen bit
-2) scan all valid records(visiable and not deleted)
-calculate node size = record size + free space
-2.1) if node size too large, do a split
-2.2) otherwise, allocate a new node N', copy records sorted, init header
-3) use path stack to find Node's parent P
-3.1) if P's frozen, retraverse to locate P
-4) 2-word PMwCAS
-r in P that points to N => N'
-P's status => detect concurrent freeze
-5) N is ready for gc
-6)
-*/
-
 /* 首次使用BzTree */
 template<typename Key, typename Val>
-void bz_tree<Key, Val>::first_use()
+void bz_tree<Key, Val>::first_use(uint32_t node_size)
 {
 	pmwcas_first_use(&pool_);
 	root_.set_null();
 	persist(&root_, sizeof(uint64_t));
+	epoch_ = 1;
+	persist(&epoch_, sizeof(uint32_t));
 }
 
 /* 初始化BzTree */
@@ -665,14 +796,19 @@ int bz_tree<Key, Val>::init(PMEMobjpool * pop, PMEMoid base_oid)
 {
 	rel_ptr<bz_node<Key, Val>>::set_base(base_oid);
 	rel_ptr<rel_ptr<bz_node<Key, Val>>>::set_base(base_oid);
+	rel_ptr<Key>::set_base(base_oid);
+	rel_ptr<Val>::set_base(base_oid);
 	pop_ = pop;
-	int err = 0;
-	if (err = pmwcas_init(&pool_, base_oid))
-		return err;
-	pmwcas_recovery(&pool_);
-	return 0;
+	return pmwcas_init(&pool_, base_oid);
 }
-
+/* 恢复BzTree */
+template<typename Key, typename Val>
+void bz_tree<Key, Val>::recovery()
+{
+	pmwcas_recovery(&pool_);
+	++epoch_;
+	persist(&epoch_, sizeof(epoch_));
+}
 /* 收工 */
 template<typename Key, typename Val>
 void bz_tree<Key, Val>::finish()
@@ -681,21 +817,30 @@ void bz_tree<Key, Val>::finish()
 }
 
 template<typename Key, typename Val>
-int bz_tree<Key, Val>::alloc_node(rel_ptr<rel_ptr<bz_node<Key, Val>>> addr, rel_ptr<bz_node<Key, Val>> expect, size_t size) {
+int bz_tree<Key, Val>::new_root() {
 	mdesc_t mdesc = pmwcas_alloc(&pool_);
-	if (mdesc.is_null())
-		return EPMWCASALLOC;
-	rel_ptr<rel_ptr<bz_node<Key, Val>>> ptr = pmwcas_reserve<bz_node<Key, Val>>(mdesc, addr, expect);
+	while (mdesc.is_null()) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		mdesc = pmwcas_alloc(&pool_);
+	}
+	
+	rel_ptr<rel_ptr<bz_node<Key, Val>>> ptr = pmwcas_reserve<bz_node<Key, Val>>(
+		mdesc, &root_, rel_ptr<bz_node<Key, Val>>::null(), RELEASE_NEW_ON_FAILED);
+	
 	TX_BEGIN(pop_) {
 		pmemobj_tx_add_range_direct(ptr.abs(), sizeof(uint64_t));
-		*ptr = pmemobj_tx_alloc(size, TOID_TYPE_NUM(struct bz_node_fake));
+		*ptr = pmemobj_tx_alloc(NODE_ALLOC_SIZE, TOID_TYPE_NUM(struct bz_node_fake));
 	} TX_END;
-	memset((*ptr).abs(), 0, size);
-	set_node_size((*ptr)->length_, size);
-	persist((*ptr).abs(), size);
+	
+	//初始化根节点
+	rel_ptr<bz_node<Key, Val>> node = *ptr;
+	memset(node.abs(), 0, NODE_ALLOC_SIZE);
+	set_node_size(node->length_, NODE_ALLOC_SIZE);
+	persist(node.abs(), NODE_ALLOC_SIZE);
+	
 	bool ret = pmwcas_commit(mdesc);
 	pmwcas_free(mdesc);
-	return ret ? 0 : EPMWCASFAIL;
+	return ret ? 0 : ERACE;
 }
 
 /*
@@ -816,6 +961,29 @@ void bz_node<Key, Val>::copy_data(uint32_t new_offset, const Key * key, const Va
 	set_value(new_offset + key_size, val);
 	persist((char *)this + new_offset, total_size);
 }
+/* 从索引结构拷贝数据到用户空间 */
+template<typename Key, typename Val>
+void bz_node<Key, Val>::copy_data(uint64_t meta_rd, std::vector<std::pair<std::shared_ptr<Key>, std::shared_ptr<Val>>> & res)
+{
+	shared_ptr<Key> sp_key;
+	if (typeid(Key) == typeid(char)) {
+		sp_key = shared_ptr<Key>(new Key[get_key_length(meta_rd)], [](Key *p) {delete[] p; });
+		copy_key(sp_key.get(), get_key(meta_rd));
+	}
+	else {
+		sp_key = make_shared<Key>(*get_key(meta_rd));
+	}
+	shared_ptr<Val> sp_val;
+	if (typeid(Val) == typeid(char)) {
+		uint32_t val_sz = get_total_length(meta_rd) - get_key_length(meta_rd);
+		sp_val = shared_ptr<Val>(new Val[val_sz], [](Val *p) {delete[] p; });
+		copy_value(sp_val.get(), get_value(meta_rd));
+	}
+	else {
+		sp_val = make_shared<Val>(*get_value(meta_rd));
+	}
+	res.emplace_back(make_pair(sp_key, sp_val));
+}
 /*
 * 重新扫描无序键值区域 */
 template<typename Key, typename Val>
@@ -854,6 +1022,7 @@ int bz_node<Key, Val>::rescan_unsorted(uint32_t beg_pos, uint32_t rec_cnt, const
 /*
 * 返回key的插入位置（相等时取最左位置）
 * 空洞情况下，左右探测找到非空洞元素
+* 如果key为空，则代表此函数用于查找排序后的meta数组中的非空meta的个数
 */
 template<typename Key, typename Val>
 int bz_node<Key, Val>::binary_search(uint64_t * meta_arr, int size, const Key * key)
@@ -864,6 +1033,12 @@ int bz_node<Key, Val>::binary_search(uint64_t * meta_arr, int size, const Key * 
 		uint64_t meta_rd = pmwcas_read(&meta_arr[mid]);
 		/* 空洞处理 BEGIN */
 		if (!is_visiable(meta_rd)) {
+			if (!key) {
+				//用于查找非空meta
+				right = mid;
+				continue;
+			}
+			//用于查找键值位置
 			bool go_left = true;
 			int left_mid = mid - 1, right_mid = mid + 1;
 			while (left_mid > left || right_mid < right) {
@@ -891,7 +1066,13 @@ int bz_node<Key, Val>::binary_search(uint64_t * meta_arr, int size, const Key * 
 			}
 		}
 		/* 空洞处理 END */
-
+		
+		if (!key) {
+			//用于查找非空meta
+			left = mid;
+			continue;
+		}
+		//用于查找键值位置
 		if (key_cmp(meta_rd, key) < 0)
 			left = mid;
 		else
@@ -950,7 +1131,7 @@ template<typename Key, typename Val>
 void bz_node<Key, Val>::copy_value(Val * dst, const Val * src)
 {
 	if (typeid(Val) == typeid(char))
-		strcpy_s((char*)dst, strlen((char*)src) + 1, (char*)src);
+		strcpy((char*)dst, (const char*)src);
 	else
 		*dst = *src;
 }
@@ -963,6 +1144,16 @@ int bz_node<Key, Val>::key_cmp(uint64_t meta_entry, const Key * key) {
 	if (*k1 == *key)
 		return 0;
 	return *k1 < *key ? -1 : 1;
+}
+template<typename Key, typename Val>
+bool bz_node<Key, Val>::key_cmp_meta(uint64_t meta_1, uint64_t meta_2)
+{
+	if (!is_visiable(meta_1))
+		return false;
+	if (!is_visiable(meta_2))
+		return true;
+	const Key * k2 = get_key(meta_2);
+	return key_cmp(meta_1, k2) < 0;
 }
 
 
@@ -989,10 +1180,19 @@ inline void set_block_size(uint64_t &s, uint64_t new_block_size) {
 	s = (s & 0xfffff000003fffff) | (new_block_size << 22);
 }
 inline uint32_t get_delete_size(uint64_t status) {
-	return 0x3fffff & status;
+	return 0x3ffffe & (status >> 1);
 }
 inline void set_delete_size(uint64_t &s, uint32_t new_delete_size) {
-	s = (s & 0xffffffffffc0000) | new_delete_size;
+	s = (s & 0xffffffffffc0001) | (new_delete_size << 1);
+}
+inline bool is_leaf(uint64_t status) {
+	return !(1 & status);
+}
+inline void set_non_leaf(uint64_t &s) {
+	s |= 1;
+}
+inline void set_leaf(uint64_t &s) {
+	s &= (~1ULL);
 }
 inline uint32_t get_node_size(uint64_t length) {
 	return length >> 32;
