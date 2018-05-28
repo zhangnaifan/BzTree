@@ -8,7 +8,7 @@ int main() {
 	bz_test<char> tcase;
 
 	for (int i = 0; i < 10; ++i) {
-		int test_cnt = 12;
+		int test_cnt = 6;
 		//Ç¿¶È»ìºÏ
 		cout << "mix" << endl;
 		tcase.run(true, true, true, true, true, true, false, test_cnt * 2);

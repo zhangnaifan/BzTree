@@ -77,8 +77,8 @@ mdesc_t pmwcas_alloc(mdesc_pool_t pool, off_t recycle_policy, off_t search_pos)
 				pool->mdescs[pos].callback = recycle_policy;
 				persist((uint64_t*)&pool->mdescs[pos].callback, sizeof(uint64_t));
 				//GC³õÊ¼»¯
-				gc_register(pool->gc);
-				gc_crit_enter(pool->gc);
+				//gc_register(pool->gc);
+				//gc_crit_enter(pool->gc);
 				return &pool->mdescs[pos];
 			}
 		}
@@ -89,7 +89,7 @@ mdesc_t pmwcas_alloc(mdesc_pool_t pool, off_t recycle_policy, off_t search_pos)
 /* exit crit; add PMwCAS entry to gc list */
 void pmwcas_free(mdesc_t mdesc) 
 {
-	gc_crit_exit(mdesc->mdesc_pool->gc);
+	//gc_crit_exit(mdesc->mdesc_pool->gc);
 	gc_limbo(mdesc->mdesc_pool->gc, mdesc.abs());
 }
 

@@ -56,8 +56,15 @@ struct bz_test {
 		uint32_t key_sz = typeid(T) == typeid(char) ? (uint32_t)strlen((char*)k) + 1 : sizeof(T);
 		if (write) {
 			print_log("INSERT", k);
-			int ret = top_obj->tree.insert(k, v, key_sz, key_sz + 8);
-			assert(!ret || ret == EUNIKEY);
+			int ret = top_obj->tree.root_->insert(&top_obj->tree, k, v, key_sz, key_sz + 8, 0x1);
+			if (ret == EALLOCSIZE) {
+				uint64_t status_rd = pmwcas_read(&top_obj->tree.root_->status_);
+				uint32_t rec_cnt = get_record_count(status_rd);
+				print_log("EALLOCSIZE", k, rec_cnt);
+			}
+			else {
+				assert(!ret || ret == EUNIKEY);
+			}
 			print_log("INSERT", k, ret);
 		}
 		if (dele) {
@@ -82,7 +89,8 @@ struct bz_test {
 			assert(ret == ENOTFOUND || !ret);
 		}
 		if (consolidate) {
-			int ret = top_obj->tree.root_->leaf_consolidate(&top_obj->tree);
+			int ret = top_obj->tree.root_->leaf_consolidate(&top_obj->tree, 
+				rel_ptr<uint64_t>::null(), rel_ptr<rel_ptr<bz_node<T, rel_ptr<T>>>>::null());
 			assert(!ret);
 		}
 	}
@@ -148,8 +156,7 @@ struct bz_test {
 		bool consolidate = false,
 		int sz = 32,
 		int concurrent = 16,
-		bool recovery = true,
-		int node_sz = NODE_ALLOC_SIZE) 
+		bool recovery = true) 
 	{
 		const char * fname = "test.pool";
 		PMEMobjpool * pop;
@@ -182,7 +189,7 @@ struct bz_test {
 		}
 		if (first) {
 			int ret = tree.new_root();
-			assert(!ret && !tree.root_.is_null() && node_sz == get_node_size(tree.root_->length_));
+			assert(!ret && !tree.root_.is_null() && NODE_ALLOC_SIZE == get_node_size(tree.root_->length_));
 			//mem_init(top_obj);
 		}
 
