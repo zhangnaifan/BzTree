@@ -125,7 +125,7 @@ next:
 	* Move the objects from the limbo list into the staging epoch.
 	*/
 	staging_epoch = ebr_staging_epoch(ebr);
-	assert(gc->epoch_list[staging_epoch] == NULL);
+	//assert(!gc->epoch_list[staging_epoch]);
 	gc->epoch_list[staging_epoch] = (gc_entry_t *)EXCHANGE((uint64_t*)&gc->limbo, NULL);
 
 

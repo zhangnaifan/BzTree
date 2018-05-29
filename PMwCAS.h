@@ -115,6 +115,8 @@ rel_ptr<uint64_t> get_magic(mdesc_pool_t pool, int i);
 */
 void pmwcas_free(mdesc_t mdesc);
 
+/* 执行释放函数 */
+void pmwcas_word_recycle(rel_ptr<uint64_t> ptr_leak);
 /*
 * 向PMwCAS描述符添加一个CAS字段
 * 返回成功/失败

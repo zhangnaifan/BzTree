@@ -6,6 +6,7 @@
 #include <tuple>
 #include <algorithm>
 #include <stack>
+#include <queue>
 
 #include "bzerrno.h"
 #include "PMwCAS.h"
@@ -13,9 +14,14 @@
 #include <mutex>
 #include <fstream>
 
-#define BZ_SPLIT		1
-#define BZ_MERGE		2
-#define BZ_CONSOLIDATE	3
+#define BZ_SPLIT			1
+#define BZ_MERGE			2
+#define BZ_CONSOLIDATE		3
+
+const uint64_t BZ_KEY_MAX = 0xdeadbeafdeadbeaf;
+
+#define BZ_TYPE_LEAF		1
+#define BZ_TYPE_NON_LEAF	2
 
 template<typename Key, typename Val>
 struct bz_tree;
@@ -31,12 +37,13 @@ POBJ_LAYOUT_TOID(layout_name, struct bz_node_fake);
 POBJ_LAYOUT_END(layout_name);
 
 /* BzTree节点头部 */
+//如果是叶节点，则Val代表实际数据的类型，否则Val为uint64_t，代表孩子节点的相对指针
 template<typename Key, typename Val>
 struct bz_node
 {
-	/* status 3: PMwCAS control, 1: frozen, 16: record count, 22: block size, 21: delete size, 1: is_leaf */
+	/* status 3: PMwCAS control, 1: frozen, 16: record count, 22: block size, 22: delete size */
 	uint64_t status_;
-	/* length 32: node size, 32: sorted count */
+	/* length 32: node size, 31: sorted count, 1: is_leaf */
 	uint64_t length_;
 	/* record meta entry 3: PMwCAS control, 1: visiable, 28: offset, 16: key length, 16: total length */
 	uint64_t * rec_meta_arr();
@@ -68,18 +75,23 @@ struct bz_node
 	void copy_data(uint64_t meta_rd, std::vector<std::pair<std::shared_ptr<Key>, std::shared_ptr<Val>>> & res);
 	int rescan_unsorted(uint32_t beg_pos, uint32_t rec_cnt, const Key * key, uint32_t total_size, uint32_t alloc_epoch);
 
-	/* SMO */
+	/* SMO辅助函数 */
 	int triger_consolidate();
 	uint32_t copy_meta(rel_ptr<bz_node<Key, Val>> dst, uint32_t rec_cnt = 0, bool sort = true);
 	uint32_t copy_payload(rel_ptr<bz_node<Key, Val>> dst, uint32_t new_rec_cnt);
-	void init_header(rel_ptr<bz_node<Key, Val>> node, uint32_t new_rec_cnt, uint32_t blk_sz);
+	void init_header(rel_ptr<bz_node<Key, Val>> dst, uint32_t new_rec_cnt, uint32_t blk_sz, int leaf_opt = 0);
 	uint32_t get_balanced_count(rel_ptr<bz_node<Key, Val>> dst);
-	void insert_sorted(rel_ptr<bz_node<Key, Val>> dst, const Key * key, rel_ptr<bz_node<Key, Val>> child, uint32_t key_size);
 	bool try_freeze();
+	void unfreeze();
+	rel_ptr<uint64_t> nth_child(int n);
 	
-	int consolidate(bz_tree<Key, Val> * tree, rel_ptr<uint64_t> parent_status, rel_ptr<rel_ptr<bz_node<Key, Val>>> parent_ptr);
-	int split_grandpa(bz_tree<Key, Val> * tree, rel_ptr<bz_node<Key, Val>> parent, rel_ptr<uint64_t> grandpa_status, rel_ptr<rel_ptr<bz_node<Key, Val>>> grandpa_ptr);
-
+	template<typename TreeVal>
+	int consolidate(bz_tree<Key, TreeVal> * tree, rel_ptr<uint64_t> parent_status, rel_ptr<uint64_t> parent_ptr);
+	template<typename TreeVal>
+	int split(bz_tree<Key, TreeVal> * tree, rel_ptr<bz_node<Key, uint64_t>> parent, rel_ptr<uint64_t> grandpa_status, rel_ptr<uint64_t> grandpa_ptr);
+	template<typename TreeVal>
+	int merge(bz_tree<Key, TreeVal> * tree, int child_id, rel_ptr<bz_node<Key, uint64_t>> parent, rel_ptr<uint64_t> grandpa_status, rel_ptr<uint64_t> grandpa_ptr);
+	
 	/* 执行叶节点的数据项操作 */
 	int insert(bz_tree<Key, Val> * tree, const Key * key, const Val * val, uint32_t key_size, uint32_t total_size, uint32_t alloc_epoch);
 	int remove(bz_tree<Key, Val> * tree, const Key * key);
@@ -99,7 +111,7 @@ template<typename Key, typename Val>
 struct bz_tree {
 	PMEMobjpool *				pop_;
 	pmwcas_pool					pool_;
-	rel_ptr<bz_node<Key, Val>>	root_;
+	uint64_t					root_;
 	uint32_t					epoch_;
 
 	void first_use(uint32_t node_size = 1024 * 1024 * 8);
@@ -110,34 +122,18 @@ struct bz_tree {
 	//int insert(const Key * key, const Val * val, uint32_t key_size, uint32_t total_size);
 
 	/* 辅助函数 */
-	int acquire_wr(std::stack<std::pair<rel_ptr<bz_node<Key, Val>>, rel_ptr<rel_ptr<bz_node<Key, Val>>>>> path_stack);
+	int acquire_wr(std::stack<std::pair<uint64_t, int>> path_stack);
 	void acquire_rd();
 	void release();
-	
+	template<typename NType>
+	int smo(std::stack<std::pair<uint64_t, int>>& path_stack);
+
+#ifdef BZ_DEBUG
+	void print_tree();
+	void print_dfs(uint64_t ptr, int level);
+
+#endif // BZ_DEBUG
 };
-
-
-
-template<typename Key, typename Val>
-int bz_node<Key, Val>::triger_consolidate()
-{
-	uint64_t status_rd = pmwcas_read(&status_);
-	uint32_t rec_cnt = get_record_count(status_rd);
-	uint32_t blk_sz = get_block_size(status_rd);
-	uint32_t dele_sz = get_delete_size(status_rd);
-	uint32_t node_sz = get_node_size(length_);
-	uint32_t free_sz = node_sz - blk_sz - sizeof(*this) - rec_cnt * sizeof(uint64_t);
-	uint32_t new_node_sz = blk_sz - dele_sz;
-	if (free_sz < NODE_CONSOLIDATE_SIZE) {
-		if (new_node_sz > NODE_SPLIT_SIZE)
-			return BZ_SPLIT;
-		else if (new_node_sz < NODE_MERGE_SIZE)
-			return BZ_MERGE;
-		else
-			return BZ_CONSOLIDATE;
-	}
-	return 0;
-}
 
 /*
 merge N
@@ -154,7 +150,14 @@ merge N
 	5.2 G's status
 	5.3 freeze P
 */
-
+template<typename Key, typename Val>
+template<typename TreeVal>
+int bz_node<Key, Val>::merge(bz_tree<Key, TreeVal> * tree, int child_id,
+	rel_ptr<bz_node<Key, uint64_t>> parent,
+	rel_ptr<uint64_t> grandpa_status, rel_ptr<uint64_t> grandpa_ptr)
+{
+	return 0;
+}
 
 /*
 split
@@ -175,9 +178,10 @@ NOTES:
 	in case success, abort the pmwcas since it has been safe.
 */
 template<typename Key, typename Val>
-int bz_node<Key, Val>::split_grandpa(
-	bz_tree<Key, Val> * tree, rel_ptr<bz_node<Key, Val>> parent,
-	rel_ptr<uint64_t> grandpa_status, rel_ptr<rel_ptr<bz_node<Key, Val>>> grandpa_ptr)
+template<typename TreeVal>
+int bz_node<Key, Val>::split(
+	bz_tree<Key, TreeVal> * tree, rel_ptr<bz_node<Key, uint64_t>> parent, 
+	rel_ptr<uint64_t> grandpa_status, rel_ptr<uint64_t> grandpa_ptr)
 {
 	/* Global Variables */
 	uint64_t status_parent_rd;
@@ -187,6 +191,13 @@ int bz_node<Key, Val>::split_grandpa(
 	if (!try_freeze())
 		return EFROZEN;
 
+	//申请真正的mdesc
+	mdesc_t mdesc = pmwcas_alloc(&tree->pool_, 0);
+	while (mdesc.is_null()) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		mdesc = pmwcas_alloc(&tree->pool_);
+	}
+
 	/* 分配N'、O、P */
 	//申请暂存内存的mdesc
 	mdesc_t tmp_mdesc = pmwcas_alloc(&tree->pool_, RELEASE_NEW_ON_FAILED);
@@ -194,12 +205,14 @@ int bz_node<Key, Val>::split_grandpa(
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		tmp_mdesc = pmwcas_alloc(&tree->pool_, RELEASE_NEW_ON_FAILED);
 	}
+
 	rel_ptr<rel_ptr<bz_node<Key, Val>>> new_left_ptr =
 		pmwcas_reserve<bz_node<Key, Val>>(tmp_mdesc, get_magic(&tree->pool_, 0), this);
 	rel_ptr<rel_ptr<bz_node<Key, Val>>> new_right_ptr =
 		pmwcas_reserve<bz_node<Key, Val>>(tmp_mdesc, get_magic(&tree->pool_, 1), this);
-	rel_ptr<rel_ptr<bz_node<Key, Val>>> new_parent_ptr =
-		pmwcas_reserve<bz_node<Key, Val>>(tmp_mdesc, get_magic(&tree->pool_, 2), this);
+	rel_ptr<rel_ptr<bz_node<Key, uint64_t>>> new_parent_ptr =
+		pmwcas_reserve<bz_node<Key, uint64_t>>(tmp_mdesc, get_magic(&tree->pool_, 2), 
+			rel_ptr<bz_node<Key, uint64_t>>(0xdeadbeaf));
 	//原子分配空间
 	TX_BEGIN(tree->pop_) {
 		pmemobj_tx_add_range_direct(new_left_ptr.abs(), sizeof(uint64_t));
@@ -209,6 +222,9 @@ int bz_node<Key, Val>::split_grandpa(
 		pmemobj_tx_add_range_direct(new_parent_ptr.abs(), sizeof(uint64_t));
 		*new_parent_ptr = pmemobj_tx_alloc(NODE_ALLOC_SIZE, TOID_TYPE_NUM(struct bz_node_fake));
 	} TX_END;
+
+	assert(!new_left_ptr->is_null() && !new_right_ptr->is_null() 
+		&& !new_parent_ptr->is_null());
 
 	/* 初始化N'和O BEGIN */
 	rel_ptr<bz_node<Key, Val>> new_left = *new_left_ptr;
@@ -235,61 +251,91 @@ int bz_node<Key, Val>::split_grandpa(
 	/* 初始化 N'和O END */
 
 	/* 初始化P' BEGIN */
-	status_parent_rd = pmwcas_read(&parent->status_);
-	if (is_frozen(status_parent_rd)) {
-		ret = EFROZEN;
-		goto IMMEDIATE_ABORT;
-	}
-	uint32_t rec_cnt = get_record_count(status_parent_rd);
-	rel_ptr<bz_node<Key, Val>> new_parent = *new_parent_ptr;
-	//拷贝meta, 计算meta数目
-	parent->copy_meta(new_parent, rec_cnt, false);
-	//拷贝key-value
-	uint32_t blk_sz = parent->copy_payload(new_parent, rec_cnt);
-	//插入K
+	//获得分割键值K
 	uint64_t meta_key = new_left->rec_meta_arr()[left_rec_cnt - 1];
 	const Key * K = new_left->get_key(meta_key);
 	uint32_t key_sz = get_key_length(meta_key);
-	if ((rec_cnt + 2) * sizeof(uint64_t) + key_sz + blk_sz + sizeof(*this) > NODE_ALLOC_SIZE) {
-		ret = EALLOCSIZE;
-		goto IMMEDIATE_ABORT;
-	}
-	uint32_t pos = new_parent->binary_search(rec_cnt, K);
-	uint64_t * parent_meta_arr = new_parent->rec_meta_arr();
-	memmove(parent_meta_arr + pos + 1, parent_meta_arr + pos, sizeof(uint64_t) * (rec_cnt - pos));
 	uint32_t tot_sz = key_sz + sizeof(uint64_t);
-	uint32_t key_offset = NODE_ALLOC_SIZE - blk_sz - tot_sz - 1;
-	parent_meta_arr[pos] = meta_vis_off_klen_tlen(0, true, key_offset, key_sz, tot_sz);
-	new_parent->copy_data(key_offset, K, &new_left, key_sz, tot_sz);
-	//修改原来指向N的指针，现在指向new_right
-	*new_parent->get_value(parent_meta_arr[pos + 1]) = new_right;
-	//初始化节点头的status和length
-	parent->init_header(new_parent, 1 + rec_cnt, blk_sz + tot_sz);
-	//持久化
-	persist(new_parent.abs(), NODE_ALLOC_SIZE);
+	uint64_t V = new_left.rel();
+	rel_ptr<bz_node<Key, uint64_t>> new_parent = *new_parent_ptr;
+	uint64_t * parent_meta_arr = new_parent->rec_meta_arr();
+
+	if (!parent.is_null()) {
+		/* 如果当前节点是非根节点 */
+		status_parent_rd = pmwcas_read(&parent->status_);
+		if (is_frozen(status_parent_rd)) {
+			ret = EFROZEN;
+			goto IMMEDIATE_ABORT;
+		}
+		uint32_t rec_cnt = get_record_count(status_parent_rd);
+		//拷贝meta, 计算meta数目
+		parent->copy_meta(new_parent, rec_cnt, false);
+		//拷贝key-value
+		uint32_t blk_sz = parent->copy_payload(new_parent, rec_cnt);
+		//插入K
+		if ((rec_cnt + 2) * sizeof(uint64_t) + key_sz + blk_sz + sizeof(*this) > NODE_ALLOC_SIZE) {
+			ret = EALLOCSIZE;
+			goto IMMEDIATE_ABORT;
+		}
+		uint32_t pos = new_parent->binary_search(rec_cnt, K);
+		memmove(parent_meta_arr + pos + 1, parent_meta_arr + pos, sizeof(uint64_t) * (rec_cnt - pos));
+		uint32_t key_offset = NODE_ALLOC_SIZE - blk_sz - tot_sz - 1;
+		parent_meta_arr[pos] = meta_vis_off_klen_tlen(0, true, key_offset, key_sz, tot_sz);
+		new_parent->copy_data(key_offset, K, &V, key_sz, tot_sz);
+		//修改原来指向N的指针，现在指向new_right
+		*new_parent->get_value(parent_meta_arr[pos + 1]) = new_right.rel();
+		//初始化节点头的status和length
+		parent->init_header(new_parent, 1 + rec_cnt, blk_sz + tot_sz);
+		//持久化
+		persist(new_parent.abs(), NODE_ALLOC_SIZE);
+	}
+	else {
+		/* 如果当前节点是根节点 */
+		//往P'插入<K, new_left>
+		uint32_t left_key_offset = NODE_ALLOC_SIZE - tot_sz - 1;
+		parent_meta_arr[0] = meta_vis_off_klen_tlen(0, true, left_key_offset, key_sz, tot_sz);
+		new_parent->copy_data(left_key_offset, K, &V, key_sz, tot_sz);
+
+		//往P'插入<BZ_KEY_MAX, new_right>
+		uint32_t right_key_offset = left_key_offset - sizeof(uint64_t) * 2;
+		parent_meta_arr[1] = meta_vis_off_klen_tlen(0, true, right_key_offset, sizeof(uint64_t), sizeof(uint64_t) * 2);
+		*(uint64_t*)new_parent->get_key(parent_meta_arr[1]) = BZ_KEY_MAX;
+		*new_parent->get_value(parent_meta_arr[1]) = new_right.rel();
+
+		//初始化status和length
+		init_header(new_parent, 2, tot_sz + sizeof(uint64_t) * 2, BZ_TYPE_NON_LEAF);
+	}
 	/* 初始化P' END */
 
 	/* 3-word pmwcas */
-	//申请真正的mdesc
-	mdesc_t mdesc = pmwcas_alloc(&tree->pool_, 0);
-	while (mdesc.is_null()) {
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
-		mdesc = pmwcas_alloc(&tree->pool_);
+	if (!grandpa_ptr.is_null()) {
+		/* 存在祖父节点 */
+		//3.1 G's ptr to P -> P'
+		pmwcas_add(mdesc, grandpa_ptr, parent.rel(), new_parent.rel());
+		//3.2 freeze P's status
+		uint64_t status_parent_new = status_frozen(status_parent_rd);
+		pmwcas_add(mdesc, &parent->status_, status_parent_rd, status_parent_new);
+		//3.3 make sure G's status is not frozen
+		uint64_t status_grandpa_rd = pmwcas_read(grandpa_status.abs());
+		if (is_frozen(status_grandpa_rd)) {
+			ret = EFROZEN;
+			goto IMMEDIATE_ABORT;
+		}
+		pmwcas_add(mdesc, grandpa_status, status_grandpa_rd, status_grandpa_rd);
 	}
-
-	auto addr = pmwcas_reserve<bz_node<Key, Val>>(mdesc, grandpa_ptr, this, 0);
-	*addr = new_parent;
-	persist(addr.abs(), sizeof(uint64_t));
-
-	uint64_t status_parent_new = status_frozen(status_parent_rd);
-	pmwcas_add(mdesc, &parent->status_, status_parent_rd, status_parent_new, 0);
-	
-	uint64_t status_grandpa_rd = pmwcas_read(grandpa_status.abs());
-	if (is_frozen(status_grandpa_rd)) {
-		ret = EFROZEN;
-		goto IMMEDIATE_ABORT;
+	else if (!parent.is_null()) {
+		/* 父节点是根节点 */
+		//3.1 root's ptr to P -> P'
+		pmwcas_add(mdesc, &tree->root_, parent.rel(), new_parent.rel());
+		//3.2 freeze P's status
+		uint64_t status_parent_new = status_frozen(status_parent_rd);
+		pmwcas_add(mdesc, &parent->status_, status_parent_rd, status_parent_new);
 	}
-	pmwcas_add(mdesc, grandpa_status, status_grandpa_rd, status_grandpa_rd, 0);
+	else {
+		/* 当前节点是根节点 */
+		rel_ptr<bz_node<Key, Val>> cur_ptr = this;
+		pmwcas_add(mdesc, &tree->root_, cur_ptr.rel(), new_parent.rel());
+	}
 
 	//执行pmwcas
 	if (!pmwcas_commit(mdesc)) {
@@ -300,11 +346,12 @@ int bz_node<Key, Val>::split_grandpa(
 	}
 
 IMMEDIATE_ABORT:
-	pmemobj_free(&new_left.oid());
-	pmemobj_free(&new_right.oid());
-	pmemobj_free(&new_parent.oid());
-	pmwcas_abort(tmp_mdesc);
+	pmwcas_word_recycle(new_left);
+	pmwcas_word_recycle(new_right);
+	pmwcas_word_recycle(new_parent);
+	unfreeze();
 FINISH_HERE:
+	pmwcas_abort(tmp_mdesc);
 	pmwcas_free(mdesc);
 	return ret;
 }
@@ -327,8 +374,9 @@ P's status => detect concurrent freeze
 6)
 */
 template<typename Key, typename Val>
-int bz_node<Key, Val>::consolidate(bz_tree<Key, Val> * tree, 
-	rel_ptr<uint64_t> parent_status, rel_ptr<rel_ptr<bz_node<Key, Val>>> parent_ptr)
+template<typename TreeVal>
+int bz_node<Key, Val>::consolidate(bz_tree<Key, TreeVal> * tree, 
+	rel_ptr<uint64_t> parent_status, rel_ptr<uint64_t> parent_ptr)
 {
 	//freeze
 	if (!try_freeze())
@@ -346,9 +394,8 @@ int bz_node<Key, Val>::consolidate(bz_tree<Key, Val> * tree,
 			parent_ptr, this, RELEASE_SWAP_PTR);
 	}
 	else {
-		rel_ptr<bz_node<Key, Val>> root(pmwcas_read((uint64_t*)&tree->root_));
 		ptr = pmwcas_reserve<bz_node<Key, Val>>(mdesc,
-			&tree->root_, this, RELEASE_SWAP_PTR);
+			(rel_ptr<bz_node<Key, Val>>*)&tree->root_, this, RELEASE_SWAP_PTR);
 	}
 	//原子分配空间
 	TX_BEGIN(tree->pop_) {
@@ -358,7 +405,6 @@ int bz_node<Key, Val>::consolidate(bz_tree<Key, Val> * tree,
 
 	//初始化节点内容为0
 	rel_ptr<bz_node<Key, Val>> node = *ptr;
-	//memset(node.abs(), 0, sizeof(*this));
 	//拷贝meta并按键值排序, 计算有效meta数目
 	uint32_t new_rec_cnt = copy_meta(node);
 	//拷贝key-value
@@ -372,6 +418,7 @@ int bz_node<Key, Val>::consolidate(bz_tree<Key, Val> * tree,
 	if (!parent_ptr.is_null()) {
 		uint64_t status_rd = pmwcas_read(parent_status.abs());
 		if (is_frozen(status_rd)) {
+			unfreeze();
 			pmwcas_free(mdesc);
 			return EFROZEN;
 		}
@@ -381,13 +428,9 @@ int bz_node<Key, Val>::consolidate(bz_tree<Key, Val> * tree,
 	//执行pmwcas
 	bool ret = pmwcas_commit(mdesc);
 	pmwcas_free(mdesc);
+	if (!ret)
+		unfreeze();
 	return ret ? 0 : ERACE;
-}
-/* 往中间节点插入一条<Key, child>数据，内部函数，不考虑竞争 */
-template<typename Key, typename Val>
-void bz_node<Key, Val>::insert_sorted(rel_ptr<bz_node<Key, Val>> dst, const Key * key, rel_ptr<bz_node<Key, Val>> child, uint32_t key_size)
-{
-	//int pos = binary_search()
 }
 /* 计算节点均分时坐节点的数据项个数 */
 template<typename Key, typename Val>
@@ -395,12 +438,12 @@ uint32_t bz_node<Key, Val>::get_balanced_count(rel_ptr<bz_node<Key, Val>> dst)
 {
 	uint64_t * left_meta_arr = dst->rec_meta_arr();
 	uint64_t status_rd = pmwcas_read(&status_);
-	uint32_t old_blk_sz = get_block_size(status_rd);
+	uint32_t old_blk_sz = get_block_size(status_rd) - get_delete_size(status_rd);
 	uint32_t left_rec_cnt = 0;
 	for (uint32_t acc_sz = 0;
 		acc_sz < old_blk_sz / 2;
 		acc_sz += get_total_length(left_meta_arr[left_rec_cnt++]));
-	return left_rec_cnt + 1;
+	return left_rec_cnt;
 }
 /* 从当前节点拷贝meta到dst节点，并按照键值和可见性排序 */
 template<typename Key, typename Val>
@@ -445,17 +488,23 @@ uint32_t bz_node<Key, Val>::copy_payload(rel_ptr<bz_node<Key, Val>> dst, uint32_
 	}
 	return blk_sz;
 }
-/* 根据参数初始化status和length */
+/* 根据参数初始化status和length，单线程调用 */
 template<typename Key, typename Val>
-void bz_node<Key, Val>::init_header(rel_ptr<bz_node<Key, Val>> dst, uint32_t new_rec_cnt, uint32_t blk_sz)
+void bz_node<Key, Val>::init_header(rel_ptr<bz_node<Key, Val>> dst, uint32_t new_rec_cnt, uint32_t blk_sz, int leaf_opt)
 {
 	dst->status_ = 0ULL;
 	set_record_count(dst->status_, new_rec_cnt);
 	set_block_size(dst->status_, blk_sz);
-	if (is_leaf(status_))
-		set_leaf(dst->status_);
+	if (!leaf_opt) {
+		if (is_leaf(length_))
+			set_leaf(dst->length_);
+		else
+			set_non_leaf(dst->length_);
+	}
+	else if (leaf_opt == BZ_TYPE_LEAF)
+		set_leaf(dst->length_);
 	else
-		set_non_leaf(dst->status_);
+		set_non_leaf(dst->length_);
 	set_node_size(dst->length_, NODE_ALLOC_SIZE);
 	set_sorted_count(dst->length_, new_rec_cnt);
 }
@@ -472,41 +521,112 @@ bool bz_node<Key, Val>::try_freeze()
 	return !is_frozen(status_rd);
 }
 
+template<typename Key, typename Val>
+inline void bz_node<Key, Val>::unfreeze()
+{
+	uint64_t status_unfrozen = status_;
+	unset_frozen(status_unfrozen);
+	CAS(&status_, status_unfrozen, status_);
+}
+
+template<typename Key, typename Val>
+inline rel_ptr<uint64_t> bz_node<Key, Val>::nth_child(int n)
+{
+	if (n < 0)
+		return rel_ptr<uint64_t>::null();
+	return get_value(rec_meta_arr()[n]);
+}
+
+
+template<typename Key, typename Val>
+int bz_node<Key, Val>::triger_consolidate()
+{
+	uint64_t status_rd = pmwcas_read(&status_);
+	uint32_t rec_cnt = get_record_count(status_rd);
+	uint32_t blk_sz = get_block_size(status_rd);
+	uint32_t dele_sz = get_delete_size(status_rd);
+	uint32_t node_sz = get_node_size(length_);
+	uint32_t free_sz = node_sz - blk_sz - sizeof(*this) - rec_cnt * sizeof(uint64_t);
+	uint32_t new_node_sz = blk_sz - dele_sz;
+	if (free_sz < NODE_CONSOLIDATE_SIZE) {
+		if (new_node_sz > NODE_SPLIT_SIZE)
+			return BZ_SPLIT;
+		else if (new_node_sz < NODE_MERGE_SIZE)
+			return BZ_MERGE;
+		else
+			return BZ_CONSOLIDATE;
+	}
+	return 0;
+}
+
+template<typename Key, typename Val>
+template<typename NType>
+int bz_tree<Key, Val>::smo(std::stack<std::pair<uint64_t, int>>& path_stack)
+{
+	rel_ptr<bz_node<Key, NType>> node(path_stack.top().first);
+	int child_id = path_stack.top().second;
+	int smo_type = node->triger_consolidate();
+	if (smo_type == BZ_CONSOLIDATE) {
+		if (child_id < 0) {
+			node->consolidate<Val>(this, rel_ptr<uint64_t>::null(), rel_ptr<uint64_t>::null());
+		}
+		else {
+			path_stack.pop();
+			assert(!path_stack.empty());
+			rel_ptr<bz_node<Key, uint64_t>> parent(path_stack.top().first);
+			node->consolidate<Val>(this, &parent->status_, parent->nth_child(child_id));
+		}
+	}
+	else if (smo_type == BZ_SPLIT) {
+		if (child_id < 0) {
+			node->split<Val>(this, rel_ptr<bz_node<Key, uint64_t>>::null(),
+				rel_ptr<uint64_t>::null(), rel_ptr<uint64_t>::null());
+		}
+		else {
+			path_stack.pop();
+			assert(!path_stack.empty());
+			rel_ptr<bz_node<Key, uint64_t>> parent(path_stack.top().first);
+			int grand_id = path_stack.top().second;
+			if (grand_id < 0) {
+				node->split<Val>(this, parent, rel_ptr<uint64_t>::null(), rel_ptr<uint64_t>::null());
+			}
+			else {
+				path_stack.pop();
+				assert(!path_stack.empty());
+				rel_ptr<bz_node<Key, uint64_t>> grandpa(path_stack.top().first);
+				node->split<Val>(this, parent, &grandpa->status_, grandpa->nth_child(grand_id));
+			}
+		}
+	}
+	else if (smo_type == BZ_MERGE) {
+
+	}
+	return smo_type;
+}
 
 /* 检查是否需要调整节点结构 & 进入GC临界区 */
+/* @param path_stack <节点相对地址, 父节点到孩子指针的相对地址> */
 template<typename Key, typename Val>
-int bz_tree<Key, Val>::acquire_wr(std::stack<std::pair<rel_ptr<bz_node<Key, Val>>, rel_ptr<rel_ptr<bz_node<Key, Val>>>>> path_stack)
+int bz_tree<Key, Val>::acquire_wr(std::stack<std::pair<uint64_t, int>> path_stack)
 {
 	//访问节点
 	gc_crit_enter(pool_.gc);
 
 	//检查是否需要结构调整SMO
 	assert(!path_stack.empty());
-	rel_ptr<bz_node<Key, Val>> node = path_stack.top().first;
-	rel_ptr<rel_ptr<bz_node<Key, Val>>> parent_ptr = path_stack.top().second;
-	int smo_type = node->triger_consolidate();
-	if (!smo_type)
-		return 0;
-	if (smo_type == BZ_CONSOLIDATE) {
-
-		if (parent_ptr.is_null()) {
-			node->consolidate(this, rel_ptr<uint64_t>::null(), parent_ptr);
-		}
-		else {
-			path_stack.pop();
-			assert(!path_stack.empty());
-			rel_ptr<bz_node<Key, Val>> parent = path_stack.top().first;
-			node->consolidate(this, &parent->status_, parent_ptr);
-		}
+	int smo_type = 0;
+	uint64_t ptr = path_stack.top().first;
+	if (is_leaf_node(ptr)) {
+		smo_type = smo<Val>(path_stack);
 	}
-	else if (smo_type == BZ_SPLIT) {
-
+	else {
+		smo_type = smo<uint64_t>(path_stack);
 	}
-	else if (smo_type == BZ_MERGE) {
-
+	if (smo_type) {
+		gc_crit_exit(pool_.gc);
+		return ESMO;
 	}
-	gc_crit_exit(pool_.gc);
-	return ESMO;
+	return 0;
 }
 /* 进入GC临界区 */
 template<typename Key, typename Val>
@@ -544,6 +664,60 @@ void bz_node<Key, Val>::print_log(const char * action, const Key * k, int ret, b
 			fs << " : " << ret;
 		fs << endl;
 	}
+	mylock.unlock();
+}
+
+template<typename Key, typename Val>
+void bz_tree<Key, Val>::print_dfs(uint64_t ptr, int level)
+{
+	if (!ptr)
+		return;
+	bool isLeaf = is_leaf_node(ptr);
+	rel_ptr<bz_node<Key, Val>> node(ptr);
+	uint64_t * meta_arr = node->rec_meta_arr();
+	uint32_t rec_cnt = get_record_count(node->status_);
+	for (int i = 0; i < level; ++i)
+		fs << "-";
+	for (uint32_t i = 0; i < rec_cnt; ++i) {
+		if (!is_visiable(meta_arr[i]))
+			continue;
+		if (isLeaf) {
+			fs << "(";
+			if (typeid(Key) == typeid(char))
+				fs << (char*)node->get_key(meta_arr[i]);
+			else
+				fs << *node->get_key(meta_arr[i]);
+			fs << ",";
+			if (typeid(Val) == typeid(rel_ptr<char>))
+				fs << (char*)(*node->get_value(meta_arr[i])).abs();
+			else
+				fs << **node->get_value(meta_arr[i]);
+			fs << ") ";
+		}
+		else if (*(uint64_t*)node->get_key(meta_arr[i]) != BZ_KEY_MAX) {
+			if (typeid(Key) == typeid(char))
+				fs << (char*)node->get_key(meta_arr[i]) << " ";
+			else
+				fs << *node->get_key(meta_arr[i]) << " ";
+		}
+		else {
+			fs << "KEY_MAX";
+		}
+	}
+	fs << "\n";
+	if (!isLeaf) {
+		for (uint32_t i = 0; i < rec_cnt; ++i) {
+			print_dfs(*(uint64_t*)node->get_value(meta_arr[i]), level + 1);
+		}
+	}
+}
+
+/* 打印树结构，单线程调用 */
+template<typename Key, typename Val>
+void bz_tree<Key, Val>::print_tree()
+{
+	mylock.lock();
+	print_dfs(root_, 1);
 	mylock.unlock();
 }
 
@@ -908,6 +1082,8 @@ int bz_node<Key, Val>::upsert(bz_tree<Key, Val> * tree, const Key * key, const V
 		|| find_key_unsorted(key, status_rd, alloc_epoch, del_pos, recheck))
 		found = true;
 
+	print_log("US-find", key, del_pos);
+
 	while (true)
 	{
 		rec_cnt = get_record_count(status_rd);
@@ -937,6 +1113,8 @@ int bz_node<Key, Val>::upsert(bz_tree<Key, Val> * tree, const Key * key, const V
 			return EFROZEN;
 	}
 
+	print_log("US-pos", key, rec_cnt);
+
 	/* copy key and val */
 	uint32_t new_offset = node_sz - blk_sz - total_size - 1;
 	copy_data(new_offset, key, val, key_size, total_size);
@@ -946,6 +1124,9 @@ int bz_node<Key, Val>::upsert(bz_tree<Key, Val> * tree, const Key * key, const V
 		int ret = rescan_unsorted(beg_pos, rec_cnt, key, total_size, alloc_epoch);
 		if (ret)
 			return ret;
+
+		print_log("US-recheck", key, rec_cnt);
+
 	}
 
 	/* set visiable; real offset; key_len and tot_len */
@@ -965,6 +1146,9 @@ int bz_node<Key, Val>::upsert(bz_tree<Key, Val> * tree, const Key * key, const V
 			/* 执行更新操作 */
 			uint64_t meta_del = pmwcas_read(&meta_arr[del_pos]);
 			if (!is_visiable(meta_del)) {
+
+				print_log("US-RACE", key, del_pos);
+
 				uint64_t status_new;
 				/* 遭遇竞争删除或更新，放弃保留的空间 */
 				set_offset(meta_arr[rec_cnt], 0);
@@ -1000,6 +1184,8 @@ int bz_node<Key, Val>::upsert(bz_tree<Key, Val> * tree, const Key * key, const V
 		}
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
+
+	print_log("US-finish", key, rec_cnt);
 
 	return 0;
 }
@@ -1050,7 +1236,7 @@ template<typename Key, typename Val>
 void bz_tree<Key, Val>::first_use(uint32_t node_size)
 {
 	pmwcas_first_use(&pool_);
-	root_.set_null();
+	root_ = 0;
 	persist(&root_, sizeof(uint64_t));
 	epoch_ = 1;
 	persist(&epoch_, sizeof(uint32_t));
@@ -1062,6 +1248,9 @@ int bz_tree<Key, Val>::init(PMEMobjpool * pop, PMEMoid base_oid)
 {
 	rel_ptr<bz_node<Key, Val>>::set_base(base_oid);
 	rel_ptr<rel_ptr<bz_node<Key, Val>>>::set_base(base_oid);
+	rel_ptr<bz_node<Key, uint64_t>>::set_base(base_oid);
+	rel_ptr<rel_ptr<bz_node<Key, uint64_t>>>::set_base(base_oid);
+	rel_ptr<bz_node<uint64_t, uint64_t>>::set_base(base_oid);
 	rel_ptr<Key>::set_base(base_oid);
 	rel_ptr<Val>::set_base(base_oid);
 	pop_ = pop;
@@ -1095,7 +1284,8 @@ int bz_tree<Key, Val>::new_root() {
 	}
 	
 	rel_ptr<rel_ptr<bz_node<Key, Val>>> ptr = pmwcas_reserve<bz_node<Key, Val>>(
-		mdesc, &root_, rel_ptr<bz_node<Key, Val>>::null(), RELEASE_NEW_ON_FAILED);
+		mdesc, (rel_ptr<bz_node<Key, Val>>*)&root_, rel_ptr<bz_node<Key, Val>>::null(), 
+		RELEASE_NEW_ON_FAILED);
 	
 	TX_BEGIN(pop_) {
 		pmemobj_tx_add_range_direct(ptr.abs(), sizeof(uint64_t));
@@ -1379,9 +1569,9 @@ uint64_t * bz_node<Key, Val>::rec_meta_arr() {
 template<typename Key, typename Val>
 Key * bz_node<Key, Val>::get_key(uint64_t meta) {
 	uint32_t off = get_offset(meta);
-	if (is_visiable(meta) && off)
-		return (Key*)((char*)this + off);
-	return nullptr;
+	if (!is_visiable(meta) || !off)
+		return nullptr;
+	return (Key*)((char*)this + off);
 }
 template<typename Key, typename Val>
 void bz_node<Key, Val>::set_key(uint32_t offset, const Key *key) {
@@ -1390,7 +1580,9 @@ void bz_node<Key, Val>::set_key(uint32_t offset, const Key *key) {
 }
 template<typename Key, typename Val>
 void bz_node<Key, Val>::copy_key(Key * dst, const Key * src) {
-	if (typeid(Key) == typeid(char))
+	if (*(uint64_t*)src == BZ_KEY_MAX)
+		*(uint64_t*)dst = BZ_KEY_MAX;
+	else if (typeid(Key) == typeid(char))
 		strcpy_s((char *)dst, strlen((char*)src) + 1, (char*)src);
 	else
 		*dst = *src;
@@ -1416,6 +1608,10 @@ void bz_node<Key, Val>::copy_value(Val * dst, const Val * src)
 template<typename Key, typename Val>
 int bz_node<Key, Val>::key_cmp(uint64_t meta_entry, const Key * key) {
 	const Key * k1 = get_key(meta_entry);
+	if (*(uint64_t*)k1 == BZ_KEY_MAX)
+		return 1;
+	if (*(uint64_t*)key == BZ_KEY_MAX)
+		return -1;
 	if (typeid(Key) == typeid(char))
 		return strcmp((char*)k1, (char*)key);
 	if (*k1 == *key)
@@ -1442,7 +1638,10 @@ inline bool is_frozen(uint64_t status) {
 	return 1 & (status >> 60);
 }
 inline void set_frozen(uint64_t &s) {
-	s |= ((uint64_t)1 << 60);
+	s |= (1ULL << 60);
+}
+inline void unset_frozen(uint64_t &s) {
+	s &= ~(1ULL << 60);
 }
 inline uint32_t get_record_count(uint64_t status) {
 	return 0xffff & (status >> 44);
@@ -1457,19 +1656,19 @@ inline void set_block_size(uint64_t &s, uint64_t new_block_size) {
 	s = (s & 0xfffff000003fffff) | (new_block_size << 22);
 }
 inline uint32_t get_delete_size(uint64_t status) {
-	return 0x3ffffe & (status >> 1);
+	return 0x3fffff & status;
 }
 inline void set_delete_size(uint64_t &s, uint32_t new_delete_size) {
-	s = (s & 0xffffffffffc0001) | (new_delete_size << 1);
+	s = (s & 0xffffffffffc0000) | new_delete_size;
 }
-inline bool is_leaf(uint64_t status) {
-	return !(1 & status);
+inline bool is_leaf(uint64_t length) {
+	return !(1 & length);
 }
-inline void set_non_leaf(uint64_t &s) {
-	s |= 1;
+inline void set_non_leaf(uint64_t &length) {
+	length |= 1;
 }
-inline void set_leaf(uint64_t &s) {
-	s &= (~1ULL);
+inline void set_leaf(uint64_t &length) {
+	length &= (~1ULL);
 }
 inline uint32_t get_node_size(uint64_t length) {
 	return length >> 32;
@@ -1478,10 +1677,10 @@ inline void set_node_size(uint64_t &s, uint64_t new_node_size) {
 	s = (s & 0xffffffff) | (new_node_size << 32);
 }
 inline uint32_t get_sorted_count(uint64_t length) {
-	return length & 0xffffffff;
+	return (length >> 1) & 0x7fffffff;
 }
 inline void set_sorted_count(uint64_t &s, uint32_t new_sorted_count) {
-	s = (s & 0xffffffff00000000) | new_sorted_count;
+	s = (s & 0xffffffff00000001) | (new_sorted_count << 1);
 }
 inline bool is_visiable(uint64_t meta) {
 	return !(1 & (meta >> 60));
@@ -1511,5 +1710,12 @@ inline void set_total_length(uint64_t &meta, uint16_t new_total_length) {
 	meta = (meta & 0xffffffffffff0000) | new_total_length;
 }
 /* 位操作函数集合 END */
+
+
+bool is_leaf_node(uint64_t node)
+{
+	rel_ptr<bz_node<uint64_t, uint64_t>> ptr(node);
+	return is_leaf(ptr->length_);
+}
 
 #endif // !BZTREE_H

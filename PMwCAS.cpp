@@ -3,6 +3,8 @@
 #include "bzerrno.h"
 #include <thread>
 #include <atomic>
+#include <fstream>
+#include <iomanip>
 
 std::atomic<bool> gc_alive = false;
 
@@ -107,8 +109,6 @@ void pmwcas_free(mdesc_t mdesc)
 	gc_limbo(mdesc->mdesc_pool->gc, mdesc.abs());
 }
 
-void pmwcas_word_recycle(rel_ptr<uint64_t> ptr_leak);
-
 /* reset desc status to FREE; reclaim memory accoding to policy */
 void pmwcas_reclaim(gc_entry_t *entry, void *arg)
 {
@@ -150,6 +150,11 @@ void pmwcas_reclaim(gc_entry_t *entry, void *arg)
 void pmwcas_word_recycle(rel_ptr<uint64_t> ptr_leak)
 {
 	pmemobj_free(&ptr_leak.oid());
+#ifdef BZ_DEBUG
+	std::fstream fs("memory.txt", std::ios::app);
+	fs << "RECYCLE " << std::setfill('0') << std::setw(16) << std::hex << ptr_leak.rel() << "\n";
+#endif // BZ_DEBUG
+
 }
 
 /*

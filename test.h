@@ -20,13 +20,6 @@ struct bz_test {
 		bz_tree<T, rel_ptr<T>> tree;
 		T data[64 * 8];
 	};
-	void mem_init(pmem_layout * top_obj)
-	{
-		int k = 0;
-		uint32_t key_sz = 8;
-		rel_ptr<int> v(top_obj->data);
-		int ret = top_obj->tree.root_->insert(&top_obj->tree, &k, &v, key_sz, key_sz + 8, 0x1);
-	}
 
 	void print_log(const char * action, T * k, int ret = -1, bool pr = false) {
 		if (!pr)
@@ -51,14 +44,16 @@ struct bz_test {
 		flag.store(false);
 	}
 	void pmem_worker(pmem_layout * top_obj, T * k, rel_ptr<T> *v,
-		bool write, bool dele, bool update, bool read, bool upsert, bool consolidate) 
+		bool write, bool dele, bool update, bool read, bool upsert, 
+		bool consolidate, bool split) 
 	{
 		uint32_t key_sz = typeid(T) == typeid(char) ? (uint32_t)strlen((char*)k) + 1 : sizeof(T);
+		rel_ptr < bz_node<T, rel_ptr<T>>> root(top_obj->tree.root_);
 		if (write) {
 			print_log("INSERT", k);
-			int ret = top_obj->tree.root_->insert(&top_obj->tree, k, v, key_sz, key_sz + 8, 0x1);
+			int ret = root->insert(&top_obj->tree, k, v, key_sz, key_sz + 8, 0x1);
 			if (ret == EALLOCSIZE) {
-				uint64_t status_rd = pmwcas_read(&top_obj->tree.root_->status_);
+				uint64_t status_rd = pmwcas_read(&root->status_);
 				uint32_t rec_cnt = get_record_count(status_rd);
 				print_log("EALLOCSIZE", k, rec_cnt);
 			}
@@ -69,34 +64,87 @@ struct bz_test {
 		}
 		if (dele) {
 			print_log("DELETE", k);
-			int ret = top_obj->tree.root_->remove(&top_obj->tree, k);
+			int ret = root->remove(&top_obj->tree, k);
 			assert(!ret || ret == ENOTFOUND);
 			print_log("DELETE", k, ret);
 		}
 		if (update) {
 			print_log("UPDATE", k);
-			int ret = top_obj->tree.root_->update(&top_obj->tree, k, v + 1, key_sz, key_sz + 8, 0x1);
+			int ret = root->update(&top_obj->tree, k, v + 1, key_sz, key_sz + 8, 0x1);
 			print_log("UPDATE", k, ret);
 		}
 		if (upsert) {
 			print_log("UPSERT", k);
-			int ret = top_obj->tree.root_->upsert(&top_obj->tree, k, v + 1, key_sz, key_sz + 8, 0x1);
+			int ret = root->upsert(&top_obj->tree, k, v + 1, key_sz, key_sz + 8, 0x1);
 			print_log("UPSERT", k, ret);
 		}
 		if (read) {
 			rel_ptr<T> data;
-			int ret = top_obj->tree.root_->read(&top_obj->tree, k, &data, 8);
+			int ret = root->read(&top_obj->tree, k, &data, 8);
 			assert(ret == ENOTFOUND || !ret);
 		}
 		if (consolidate) {
-			int ret = top_obj->tree.root_->consolidate(&top_obj->tree, 
-				rel_ptr<uint64_t>::null(), rel_ptr<rel_ptr<bz_node<T, rel_ptr<T>>>>::null());
+			int ret = root->consolidate<rel_ptr<T>>(&top_obj->tree,
+				rel_ptr<uint64_t>::null(), rel_ptr<uint64_t>::null());
 			assert(!ret);
+
+			//失败的consolidate
+			rel_ptr<bz_node<T, uint64_t>> root_2(top_obj->tree.root_);
+			ret = root_2->consolidate<rel_ptr<T>>(&top_obj->tree,
+				rel_ptr<uint64_t>::null(), rel_ptr<uint64_t>(0xabcd));
+			assert(ret);
+		}
+		if (split) {
+			top_obj->tree.print_tree();
+
+			//分裂root
+			rel_ptr<bz_node<T, rel_ptr<T>>> root_1(top_obj->tree.root_);
+			int ret = root_1->split<rel_ptr<T>>(&top_obj->tree, rel_ptr<bz_node<T, uint64_t>>::null(),
+				rel_ptr<uint64_t>::null(), rel_ptr<uint64_t>::null());
+			assert(!ret);
+			top_obj->tree.print_tree();
+
+			//分裂left
+			rel_ptr<bz_node<T, uint64_t>> root_2(top_obj->tree.root_);
+			uint64_t * meta_arr = root_2->rec_meta_arr();
+			rel_ptr<bz_node<T, rel_ptr<T>>> left(*root_2->get_value(meta_arr[0]));
+			ret = left->split<rel_ptr<T>>(&top_obj->tree, root_2,
+				rel_ptr<uint64_t>::null(), rel_ptr<uint64_t>::null());
+			assert(!ret);
+			top_obj->tree.print_tree();
+
+			//失败的分裂right
+			rel_ptr<bz_node<T, uint64_t>> root_3(top_obj->tree.root_);
+			meta_arr = root_2->rec_meta_arr();
+			rel_ptr<bz_node<T, rel_ptr<T>>> right(*root_3->get_value(meta_arr[1]));
+			ret = right->split<rel_ptr<T>>(&top_obj->tree, root_3,
+				rel_ptr<uint64_t>(0xabcd), rel_ptr<uint64_t>(0xabcd));
+			assert(ret);
+			top_obj->tree.print_tree();
+
+			//分裂root
+			rel_ptr<bz_node<T, uint64_t>> root_5(top_obj->tree.root_);
+			ret = root_5->split<rel_ptr<T>>(&top_obj->tree, 
+				rel_ptr<bz_node<T, uint64_t>>::null(),
+				rel_ptr<uint64_t>::null(), rel_ptr<uint64_t>::null());
+			assert(!ret);
+			top_obj->tree.print_tree();
+
+			//分裂left left
+			rel_ptr<bz_node<T, uint64_t>> root_6(top_obj->tree.root_);
+			meta_arr = root_6->rec_meta_arr();
+			rel_ptr<uint64_t> grandpa_ptr = root_6->get_value(meta_arr[0]);
+			rel_ptr<bz_node<T, uint64_t>> new_left_plus(*grandpa_ptr);
+			rel_ptr<bz_node<T, rel_ptr<T>>> left_left(*new_left_plus->get_value(meta_arr[0]));
+			ret = left_left->split<rel_ptr<T>>(&top_obj->tree, new_left_plus,
+				&root_6->status_, grandpa_ptr);
+			assert(!ret);
+			top_obj->tree.print_tree();
 		}
 	}
 	void show_mem(pmem_layout * top_obj, int sz)
 	{
-		auto root = &(*top_obj->tree.root_);
+		rel_ptr<bz_node<T, rel_ptr<T>>> root(top_obj->tree.root_);
 		uint64_t * meta_arr = root->rec_meta_arr();
 		int rec_cnt = get_record_count(root->status_);
 		cout << setfill('0') << setw(16) << hex << root->status_ << endl;
@@ -138,7 +186,8 @@ struct bz_test {
 	}
 	void range_scan(pmem_layout * top_obj, T * beg, T * end)
 	{
-		auto res = top_obj->tree.root_->range_scan(beg, end);
+		rel_ptr < bz_node<T, rel_ptr<T>>> root(top_obj->tree.root_);
+		auto res = root->range_scan(beg, end);
 		for (auto kv : res) {
 			if (typeid(T) == typeid(char))
 				cout << kv.first.get() << " : " << (char*)(*kv.second.get()).abs() << endl;
@@ -154,6 +203,7 @@ struct bz_test {
 		bool read = false,
 		bool upsert = false,
 		bool consolidate = false,
+		bool split = false,
 		int sz = 32,
 		int concurrent = 16,
 		bool recovery = true) 
@@ -189,8 +239,8 @@ struct bz_test {
 		}
 		if (first) {
 			int ret = tree.new_root();
-			assert(!ret && !tree.root_.is_null() && NODE_ALLOC_SIZE == get_node_size(tree.root_->length_));
-			//mem_init(top_obj);
+			rel_ptr < bz_node<T, rel_ptr<T>>> root(top_obj->tree.root_);
+			assert(!ret && !root.is_null() && NODE_ALLOC_SIZE == get_node_size(root->length_));
 		}
 
 		char *char_keys[64];
@@ -211,22 +261,26 @@ struct bz_test {
 					this, top_obj, 
 					typeid(T) == typeid(char) ? (T*)char_keys[index] : &keys[index], 
 					&vals[index],
-					write, dele, update, read, upsert, consolidate);
+					write, dele, update, read, upsert, 
+					consolidate, split);
 			}
 		for (int i = 0; i < sz * concurrent; ++i) {
 			t[i].join();
 		}
 
-		auto root = &*tree.root_;
-		uint64_t * meta_arr = root->rec_meta_arr();
-		int rec_cnt = get_record_count(root->status_);
-		
-		show_mem(top_obj, rec_cnt);
-		if (typeid(T) == typeid(char))
-			range_scan(top_obj, (T*)char_keys[0], (T*)char_keys[9]);
-		else
-			range_scan(top_obj, &keys[0], &keys[63]);
+		//打印
+		if (!split) {
+			rel_ptr<bz_node<T, uint64_t>> root(top_obj->tree.root_);
+			uint64_t * meta_arr = root->rec_meta_arr();
+			int rec_cnt = get_record_count(root->status_);
+			show_mem(top_obj, rec_cnt);
+			if (typeid(T) == typeid(char))
+				range_scan(top_obj, (T*)char_keys[0], (T*)char_keys[9]);
+			else
+				range_scan(top_obj, &keys[0], &keys[63]);
+		}
 
+		//收工
 		for (int i = 0; i < 64; ++i) {
 			delete[] char_keys[i];
 		}
