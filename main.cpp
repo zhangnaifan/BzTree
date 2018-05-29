@@ -27,7 +27,9 @@ int main() {
 		//consolidate
 		cout << "consolidate" << endl;
 		tcase.run(false, false, false, false, false, false, true, 1, 1);
-
+		//upsert
+		cout << "upsert" << endl;
+		tcase.run(false, false, false, false, true, true, false, test_cnt * 2);
 	}
 	system("pause");
 	return 0;

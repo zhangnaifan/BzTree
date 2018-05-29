@@ -14,6 +14,10 @@ void pmwcas_first_use(mdesc_pool_t pool)
 		pool->mdescs[i].status = ST_FREE;
 		persist(&pool->mdescs[i].status, sizeof(pool->mdescs[i].status));
 	}
+	for (off_t i = 0; i < WORD_DESCRIPTOR_SIZE; ++i) {
+		pool->magic[i] = 0;
+		persist(&pool->magic[i], sizeof(uint64_t));
+	}
 }
 
 void pmwcas_reclaim(gc_entry_t *entry, void *arg);
@@ -84,6 +88,16 @@ mdesc_t pmwcas_alloc(mdesc_pool_t pool, off_t recycle_policy, off_t search_pos)
 		}
 	}
 	return mdesc_t::null();
+}
+
+bool pmwcas_abort(mdesc_t mdesc)
+{
+	return ST_UNDECIDED == CAS(&mdesc->status, ST_FREE, ST_UNDECIDED);
+}
+
+rel_ptr<uint64_t> get_magic(mdesc_pool_t pool, int i) 
+{ 
+	return &pool->magic[i]; 
 }
 
 /* exit crit; add PMwCAS entry to gc list */

@@ -89,7 +89,7 @@ struct bz_test {
 			assert(ret == ENOTFOUND || !ret);
 		}
 		if (consolidate) {
-			int ret = top_obj->tree.root_->leaf_consolidate(&top_obj->tree, 
+			int ret = top_obj->tree.root_->consolidate(&top_obj->tree, 
 				rel_ptr<uint64_t>::null(), rel_ptr<rel_ptr<bz_node<T, rel_ptr<T>>>>::null());
 			assert(!ret);
 		}

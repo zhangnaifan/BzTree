@@ -63,6 +63,7 @@ struct pmwcas_pool
 	//recycle_func_t		callbacks[CALLBACK_SIZE];
 	gc_t *			gc;
 	pmwcas_entry	mdescs[DESCRIPTOR_POOL_SIZE];
+	uint64_t		magic[WORD_DESCRIPTOR_SIZE];
 };
 
 /* 
@@ -100,6 +101,13 @@ void pmwcas_recovery(mdesc_pool_t pool);
 * 失败时返回空的相对指针
 */
 mdesc_t pmwcas_alloc(mdesc_pool_t pool, off_t recycle_policy = 0, off_t search_pos = 0);
+
+/*
+* 放弃执行PMwCAS, 单线程调用
+* 用于暂时保管分配的内存，以便于系统断电后回收
+*/
+bool pmwcas_abort(mdesc_t mdesc);
+rel_ptr<uint64_t> get_magic(mdesc_pool_t pool, int i);
 
 /*
 * 每次执行完PMwCAS之后调用
