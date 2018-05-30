@@ -45,7 +45,7 @@ struct bz_test {
 	}
 	void pmem_worker(pmem_layout * top_obj, T * k, rel_ptr<T> *v,
 		bool write, bool dele, bool update, bool read, bool upsert, 
-		bool consolidate, bool split) 
+		bool consolidate, bool split, bool merge) 
 	{
 		uint32_t key_sz = typeid(T) == typeid(char) ? (uint32_t)strlen((char*)k) + 1 : sizeof(T);
 		rel_ptr < bz_node<T, rel_ptr<T>>> root(top_obj->tree.root_);
@@ -135,11 +135,58 @@ struct bz_test {
 			meta_arr = root_6->rec_meta_arr();
 			rel_ptr<uint64_t> grandpa_ptr = root_6->get_value(meta_arr[0]);
 			rel_ptr<bz_node<T, uint64_t>> new_left_plus(*grandpa_ptr);
+			meta_arr = new_left_plus->rec_meta_arr();
 			rel_ptr<bz_node<T, rel_ptr<T>>> left_left(*new_left_plus->get_value(meta_arr[0]));
 			ret = left_left->split<rel_ptr<T>>(&top_obj->tree, new_left_plus,
 				&root_6->status_, grandpa_ptr);
 			assert(!ret);
 			top_obj->tree.print_tree();
+		}
+		if (merge) {
+			//需要保证split=true
+			uint64_t * meta_arr;
+			rel_ptr<uint64_t> grandpa_ptr;
+			int ret;
+			/*
+			//merge left-left fails
+			rel_ptr<bz_node<T, uint64_t>> root_5(top_obj->tree.root_);
+			uint64_t * meta_arr = root_5->rec_meta_arr();
+			rel_ptr<uint64_t> grandpa_ptr = root_5->get_value(meta_arr[0]);
+			rel_ptr<bz_node<T, uint64_t>> left(*grandpa_ptr);
+			meta_arr = left->rec_meta_arr();
+			rel_ptr<bz_node<T, rel_ptr<T>>> left_left(*left->get_value(meta_arr[0]));
+			int ret = left_left->merge<rel_ptr<T>>(&top_obj->tree, 0, left,
+				&root_5->status_, rel_ptr<uint64_t>(0xabcd));
+			assert(ret);
+			*/
+
+			//merge left-left
+			rel_ptr<bz_node<T, uint64_t>> root_6(top_obj->tree.root_);
+			meta_arr = root_6->rec_meta_arr();
+			grandpa_ptr = root_6->get_value(meta_arr[0]);
+			rel_ptr<bz_node<T, uint64_t>> left_6(*grandpa_ptr);
+			meta_arr = left_6->rec_meta_arr();
+			rel_ptr<bz_node<T, rel_ptr<T>>> left_left_6(*left_6->get_value(meta_arr[0]));
+			ret = left_left_6->merge<rel_ptr<T>>(&top_obj->tree, 0, left_6,
+				&root_6->status_, grandpa_ptr);
+			assert(!ret);
+			top_obj->tree.print_tree();
+
+			//merge left
+			rel_ptr<bz_node<T, uint64_t>> root_7(top_obj->tree.root_);
+			meta_arr = root_7->rec_meta_arr();
+			rel_ptr<bz_node<T, uint64_t>> left_7(*root_7->get_value(meta_arr[0]));
+			ret = left_7->merge<rel_ptr<T>>(&top_obj->tree, 0, root_7,
+				rel_ptr<uint64_t>::null(), rel_ptr<uint64_t>::null());
+			assert(!ret);
+			top_obj->tree.print_tree();
+
+			//merge root fails
+			rel_ptr<bz_node<T, uint64_t>> root_8(top_obj->tree.root_);
+			ret = root_8->merge<rel_ptr<T>>(&top_obj->tree, 0, 
+				rel_ptr<bz_node<T, uint64_t>>::null(),
+				rel_ptr<uint64_t>::null(), rel_ptr<uint64_t>::null());
+			assert(ret);
 		}
 	}
 	void show_mem(pmem_layout * top_obj, int sz)
@@ -204,6 +251,7 @@ struct bz_test {
 		bool upsert = false,
 		bool consolidate = false,
 		bool split = false,
+		bool merge = false,
 		int sz = 32,
 		int concurrent = 16,
 		bool recovery = true) 
@@ -262,7 +310,7 @@ struct bz_test {
 					typeid(T) == typeid(char) ? (T*)char_keys[index] : &keys[index], 
 					&vals[index],
 					write, dele, update, read, upsert, 
-					consolidate, split);
+					consolidate, split, merge);
 			}
 		for (int i = 0; i < sz * concurrent; ++i) {
 			t[i].join();
