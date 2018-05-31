@@ -3,10 +3,19 @@
 #include "bzerrno.h"
 #include <thread>
 #include <atomic>
-#include <fstream>
-#include <iomanip>
 
-std::atomic<bool> gc_alive = false;
+#ifdef BZ_DEBUG
+#include <iomanip>
+#include <fstream>
+#include <mutex>
+std::mutex flag;
+std::fstream mem_fs("memory.txt", std::ios::app);
+#endif // BZ_DEBUG
+
+uint64_t GC_CAN_QUIT	= 0;
+uint64_t GC_BUSY		= 1;
+uint64_t GC_QUIT		= 2;
+uint64_t gc_alive		= GC_CAN_QUIT;
 
 /* set desc status to FREE */
 void pmwcas_first_use(mdesc_pool_t pool)
@@ -45,9 +54,10 @@ int pmwcas_init(mdesc_pool_t pool, PMEMoid oid)
 		return EGCCREAT;
 	/* 创建GC线程 */
 	std::thread gc([pool] {
-		gc_alive.store(true);
-		while (gc_alive.load(std::memory_order_consume)) {
+		gc_alive = GC_CAN_QUIT;
+		while (GC_QUIT != CAS(&gc_alive, GC_BUSY, GC_CAN_QUIT)) {
 			gc_cycle(pool->gc);
+			CAS(&gc_alive, GC_CAN_QUIT, GC_BUSY);
 			std::this_thread::sleep_for(std::chrono::milliseconds(GC_WAIT_MS));
 		}
 	});
@@ -57,7 +67,7 @@ int pmwcas_init(mdesc_pool_t pool, PMEMoid oid)
 
 void pmwcas_finish(mdesc_pool_t pool)
 {
-	gc_alive.store(false, std::memory_order_release);
+	while (GC_QUIT != CAS(&gc_alive, GC_QUIT, GC_CAN_QUIT));
 	gc_full(pool->gc, 50);
 	gc_destroy(pool->gc);
 	pool->gc = nullptr;
@@ -151,8 +161,9 @@ void pmwcas_word_recycle(rel_ptr<uint64_t> ptr_leak)
 {
 	pmemobj_free(&ptr_leak.oid());
 #ifdef BZ_DEBUG
-	std::fstream fs("memory.txt", std::ios::app);
-	fs << "RECYCLE " << std::setfill('0') << std::setw(16) << std::hex << ptr_leak.rel() << "\n";
+	flag.lock();
+	mem_fs << "RECYCLE " << std::setfill('0') << std::setw(16) << std::hex << ptr_leak.rel() << "\n";
+	flag.unlock();
 #endif // BZ_DEBUG
 
 }

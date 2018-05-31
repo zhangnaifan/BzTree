@@ -251,7 +251,7 @@ int bz_node<Key, Val>::merge(bz_tree<Key, TreeVal> * tree, int child_id,
 	//申请真正的mdesc
 	mdesc_t mdesc = pmwcas_alloc(&tree->pool_);
 	while (mdesc.is_null()) {
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		std::this_thread::sleep_for(std::chrono::microseconds(1));
 		mdesc = pmwcas_alloc(&tree->pool_);
 	}
 	//freeze parent
@@ -262,7 +262,7 @@ int bz_node<Key, Val>::merge(bz_tree<Key, TreeVal> * tree, int child_id,
 	//申请暂存内存的mdesc
 	mdesc_t tmp_mdesc = pmwcas_alloc(&tree->pool_, RELEASE_NEW_ON_FAILED);
 	while (tmp_mdesc.is_null()) {
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		std::this_thread::sleep_for(std::chrono::microseconds(1));
 		tmp_mdesc = pmwcas_alloc(&tree->pool_, RELEASE_NEW_ON_FAILED);
 	}
 	rel_ptr<rel_ptr<bz_node<Key, Val>>> new_node_ptr =
@@ -366,7 +366,7 @@ int bz_node<Key, Val>::merge(bz_tree<Key, TreeVal> * tree, int child_id,
 
 IMMEDIATE_ABORT:
 	pmwcas_word_recycle(new_node);
-	if (child_max > 1)
+	if (!new_parent.is_null())
 		pmwcas_word_recycle(new_parent);
 	unfreeze();
 	sibling->unfreeze();
@@ -411,7 +411,7 @@ int bz_node<Key, Val>::split(
 	//申请真正的mdesc
 	mdesc_t mdesc = pmwcas_alloc(&tree->pool_, 0);
 	while (mdesc.is_null()) {
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		std::this_thread::sleep_for(std::chrono::microseconds(1));
 		mdesc = pmwcas_alloc(&tree->pool_);
 	}
 
@@ -419,7 +419,7 @@ int bz_node<Key, Val>::split(
 	//申请暂存内存的mdesc
 	mdesc_t tmp_mdesc = pmwcas_alloc(&tree->pool_, RELEASE_NEW_ON_FAILED);
 	while (tmp_mdesc.is_null()) {
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		std::this_thread::sleep_for(std::chrono::microseconds(1));
 		tmp_mdesc = pmwcas_alloc(&tree->pool_, RELEASE_NEW_ON_FAILED);
 	}
 
@@ -449,19 +449,22 @@ int bz_node<Key, Val>::split(
 	rel_ptr<bz_node<Key, uint64_t>> new_parent = *new_parent_ptr;
 	//拷贝meta到new_left并按键值排序
 	uint32_t new_rec_cnt = copy_meta(new_left);
-	//按照大小平均分配键值对
-	uint32_t left_rec_cnt = get_balanced_count(new_left);
-	uint32_t right_rec_cnt = new_rec_cnt - left_rec_cnt;
-	//无需split
-	if (right_rec_cnt == 0 || right_rec_cnt == 1 && *(uint64_t*)nth_key(0) == BZ_KEY_MAX) {
+	if (new_rec_cnt < 2) {
 		pmwcas_word_recycle(new_left);
 		pmwcas_word_recycle(new_right);
 		pmwcas_word_recycle(new_parent);
 		pmwcas_abort(tmp_mdesc);
 		pmwcas_free(mdesc);
 		unfreeze();
-		return EFROZEN;
+		return ENONEED;
 	}
+	//按照大小平均分配键值对
+	uint32_t left_rec_cnt = get_balanced_count(new_left);
+	//保证至少有一个到右节点
+	if (left_rec_cnt == new_rec_cnt) {
+		--left_rec_cnt;
+	}
+	uint32_t right_rec_cnt = new_rec_cnt - left_rec_cnt;
 	//拷贝meta到new_right
 	memcpy(new_right->rec_meta_arr(), new_left->rec_meta_arr() + left_rec_cnt, 
 		right_rec_cnt * sizeof(uint64_t));
@@ -611,7 +614,7 @@ int bz_node<Key, Val>::consolidate(bz_tree<Key, TreeVal> * tree,
 	//申请mdesc
 	mdesc_t mdesc = pmwcas_alloc(&tree->pool_, 0);
 	while (mdesc.is_null()) {
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		std::this_thread::sleep_for(std::chrono::microseconds(1));
 		mdesc = pmwcas_alloc(&tree->pool_);
 	}
 	rel_ptr<rel_ptr<bz_node<Key, Val>>> ptr;
@@ -628,6 +631,7 @@ int bz_node<Key, Val>::consolidate(bz_tree<Key, TreeVal> * tree,
 		pmemobj_tx_add_range_direct(ptr.abs(), sizeof(uint64_t));
 		*ptr = pmemobj_tx_alloc(NODE_ALLOC_SIZE, TOID_TYPE_NUM(struct bz_node_fake));
 	} TX_END;
+	assert(!ptr->is_null());
 
 	//初始化节点内容为0
 	rel_ptr<bz_node<Key, Val>> node = *ptr;
@@ -1043,7 +1047,7 @@ int bz_node<Key, Val>::insert(bz_tree<Key, Val> * tree, const Key * key, const V
 			}))
 			break;
 		recheck = true;
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		std::this_thread::sleep_for(std::chrono::microseconds(1));
 		status_rd = pmwcas_read(&status_);
 		if (is_frozen(status_rd))
 			return EFROZEN;
@@ -1068,19 +1072,23 @@ int bz_node<Key, Val>::insert(bz_tree<Key, Val> * tree, const Key * key, const V
 
 	while (true)
 	{
+		uint64_t meta_new_rd = pmwcas_read(&meta_arr[rec_cnt]);
+		assert(meta_new_rd == meta_new);
+
 		status_rd = pmwcas_read(&status_);
 		if (is_frozen(status_rd)) {
 			set_offset(meta_arr[rec_cnt], 0);
 			persist(&meta_arr[rec_cnt], sizeof(uint64_t));
 			return EFROZEN;
 		}
+
 		/* 2-word PMwCAS */
 		if (pack_pmwcas(&tree->pool_, {
 			{ &status_, status_rd, status_rd },
 			{ &meta_arr[rec_cnt], meta_new, meta_new_plus }
 			}))
 			break;
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		std::this_thread::sleep_for(std::chrono::microseconds(1));
 	}
 
 	print_log("IS-finish", key, rec_cnt);
@@ -1121,11 +1129,15 @@ int bz_node<Key, Val>::remove(bz_tree<Key, Val> * tree, const Key * key)
 			return ENOTFOUND;
 		}
 
+		status_rd = pmwcas_read(&status_);
+		if (is_frozen(status_rd))
+			return EFROZEN;
+
 		/* 增加delete size */
 		uint64_t status_new = status_del(status_rd, get_total_length(meta_rd));
 
 		/* unset visible，offset=0*/
-		uint64_t meta_new = meta_vis_off(0, false, 0);
+		uint64_t meta_new = meta_vis_off(meta_rd, false, 0);
 
 		/* 2-word PMwCAS */
 		if (pack_pmwcas(&tree->pool_, {
@@ -1133,10 +1145,7 @@ int bz_node<Key, Val>::remove(bz_tree<Key, Val> * tree, const Key * key)
 			{ &meta_arr[pos], meta_rd, meta_new }
 			}))
 			break;
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
-		status_rd = pmwcas_read(&status_);
-		if (is_frozen(status_rd))
-			return EFROZEN;
+		std::this_thread::sleep_for(std::chrono::microseconds(1));
 	}
 	return 0;
 }
@@ -1216,7 +1225,7 @@ int bz_node<Key, Val>::update(bz_tree<Key, Val> * tree, const Key * key, const V
 			}))
 			break;
 		recheck = true;
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		std::this_thread::sleep_for(std::chrono::microseconds(1));
 		status_rd = pmwcas_read(&status_);
 		if (is_frozen(status_rd))
 			return EFROZEN;
@@ -1241,7 +1250,9 @@ int bz_node<Key, Val>::update(bz_tree<Key, Val> * tree, const Key * key, const V
 
 	while (true)
 	{
-		//meta_new = pmwcas_read(&meta_arr[rec_cnt]);
+		uint64_t meta_new_rd = pmwcas_read(&meta_arr[rec_cnt]);
+		assert(meta_new_rd == meta_new);
+
 		status_rd = pmwcas_read(&status_);
 		if (is_frozen(status_rd)) {
 			/* frozen set */
@@ -1273,7 +1284,7 @@ int bz_node<Key, Val>::update(bz_tree<Key, Val> * tree, const Key * key, const V
 			{ &meta_arr[del_pos], meta_del, meta_del_new }
 			}))
 			break;
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		std::this_thread::sleep_for(std::chrono::microseconds(1));
 	}
 
 	print_log("UP-finish", key, rec_cnt);
@@ -1356,7 +1367,7 @@ int bz_node<Key, Val>::upsert(bz_tree<Key, Val> * tree, const Key * key, const V
 			}))
 			break;
 		recheck = true;
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		std::this_thread::sleep_for(std::chrono::microseconds(1));
 		status_rd = pmwcas_read(&status_);
 		if (is_frozen(status_rd))
 			return EFROZEN;
@@ -1383,7 +1394,9 @@ int bz_node<Key, Val>::upsert(bz_tree<Key, Val> * tree, const Key * key, const V
 
 	while (true)
 	{
-		//meta_new = pmwcas_read(&meta_arr[rec_cnt]);
+		uint64_t meta_new_rd = pmwcas_read(&meta_arr[rec_cnt]);
+		assert(meta_new_rd == meta_new);
+
 		status_rd = pmwcas_read(&status_);
 		if (is_frozen(status_rd)) {
 			/* frozen set */
@@ -1432,7 +1445,7 @@ int bz_node<Key, Val>::upsert(bz_tree<Key, Val> * tree, const Key * key, const V
 				}))
 				break;
 		}
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		std::this_thread::sleep_for(std::chrono::microseconds(1));
 	}
 
 	print_log("US-finish", key, rec_cnt);
@@ -1529,7 +1542,7 @@ template<typename Key, typename Val>
 int bz_tree<Key, Val>::new_root() {
 	mdesc_t mdesc = pmwcas_alloc(&pool_);
 	while (mdesc.is_null()) {
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		std::this_thread::sleep_for(std::chrono::microseconds(1));
 		mdesc = pmwcas_alloc(&pool_);
 	}
 	
@@ -1727,7 +1740,7 @@ int bz_node<Key, Val>::rescan_unsorted(uint32_t beg_pos, uint32_t rec_cnt, const
 		}
 		else if (get_offset(meta_rd) == alloc_epoch) {
 			// 潜在的UNIKEY竞争，必须等待其完成
-			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			std::this_thread::sleep_for(std::chrono::microseconds(1));
 			continue;
 		}
 		++i;

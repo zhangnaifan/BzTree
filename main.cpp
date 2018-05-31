@@ -7,7 +7,7 @@ int main() {
 	
 	bz_test<char> tcase;
 
-	for (int i = 0; i < 1; ++i) {
+	for (int i = 0; i < 0; ++i) {
 		int test_cnt = 6;
 		//upsert
 		cout << "upsert" << endl;
@@ -16,7 +16,7 @@ int main() {
 		tcase.run(false, false, false, false, false, false, false, true, true, 1, 1);
 	}
 
-	for (int i = 0; i < 0; ++i) {
+	for (int i = 0; i < 10; ++i) {
 		int test_cnt = 6;
 		//Ç¿¶È»ìºÏ
 		cout << "mix" << endl;
@@ -40,8 +40,8 @@ int main() {
 		cout << "upsert" << endl;
 		tcase.run(false, false, false, false, true, true, false, false, false, test_cnt * 2);
 		//split
-		cout << "split" << endl;
-		tcase.run(false, false, false, false, false, false, false, true, false, 1, 1);
+		cout << "split and merge" << endl;
+		tcase.run(false, false, false, false, false, false, false, true, true, 1, 1);
 	}
 	system("pause");
 	return 0;

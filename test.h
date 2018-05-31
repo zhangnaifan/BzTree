@@ -77,6 +77,8 @@ struct bz_test {
 			print_log("UPSERT", k);
 			int ret = root->upsert(&top_obj->tree, k, v + 1, key_sz, key_sz + 8, 0x1);
 			print_log("UPSERT", k, ret);
+			if (ret == ECORRUPT)
+				print_log("FATAL CORRUPT", k, ret);
 		}
 		if (read) {
 			rel_ptr<T> data;
@@ -147,18 +149,17 @@ struct bz_test {
 			uint64_t * meta_arr;
 			rel_ptr<uint64_t> grandpa_ptr;
 			int ret;
-			/*
+
 			//merge left-left fails
 			rel_ptr<bz_node<T, uint64_t>> root_5(top_obj->tree.root_);
-			uint64_t * meta_arr = root_5->rec_meta_arr();
-			rel_ptr<uint64_t> grandpa_ptr = root_5->get_value(meta_arr[0]);
+			meta_arr = root_5->rec_meta_arr();
+			grandpa_ptr = root_5->get_value(meta_arr[0]);
 			rel_ptr<bz_node<T, uint64_t>> left(*grandpa_ptr);
 			meta_arr = left->rec_meta_arr();
 			rel_ptr<bz_node<T, rel_ptr<T>>> left_left(*left->get_value(meta_arr[0]));
-			int ret = left_left->merge<rel_ptr<T>>(&top_obj->tree, 0, left,
+			ret = left_left->merge<rel_ptr<T>>(&top_obj->tree, 0, left,
 				&root_5->status_, rel_ptr<uint64_t>(0xabcd));
 			assert(ret);
-			*/
 
 			//merge left-left
 			rel_ptr<bz_node<T, uint64_t>> root_6(top_obj->tree.root_);

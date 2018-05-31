@@ -11,4 +11,5 @@ const int ENOSPACE = 8;
 const int ERACE = 9;
 const int ESMO = 10;
 const int ENONEED = 11;
+const int ECORRUPT = 12;
 #endif // !BZERRORNO_H
