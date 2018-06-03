@@ -21,7 +21,7 @@ struct bz_test {
 		T data[64 * 8];
 	};
 
-	void print_log(const char * action, T * k, int ret = -1, bool pr = false) {
+	void print_log(const char * action, T * k, int ret = -1, bool pr = true) {
 		if (!pr)
 			return;
 		while (flag.exchange(true)) {
@@ -45,7 +45,8 @@ struct bz_test {
 	}
 	void pmem_worker(pmem_layout * top_obj, T * k, rel_ptr<T> *v,
 		bool write, bool dele, bool update, bool read, bool upsert, 
-		bool consolidate, bool split, bool merge) 
+		bool consolidate, bool split, bool merge,
+		bool tree_insert) 
 	{
 		uint32_t key_sz = typeid(T) == typeid(char) ? (uint32_t)strlen((char*)k) + 1 : sizeof(T);
 		rel_ptr < bz_node<T, rel_ptr<T>>> root(top_obj->tree.root_);
@@ -189,6 +190,34 @@ struct bz_test {
 				rel_ptr<uint64_t>::null(), rel_ptr<uint64_t>::null());
 			assert(ret);
 		}
+		if (tree_insert) {
+			for (int i = 0; i < 48; ++i) {
+				key_sz = typeid(T) == typeid(char) ? (uint32_t)strlen((char*)(k+i)) + 1 : sizeof(T);
+				print_log("TREE_INSERT", k + i);
+				int ret = top_obj->tree.insert(k + i, v + i, key_sz, key_sz + 8);
+				print_log("TREE_INSERT", k + i, ret);
+				//assert(!ret || ret == EUNIKEY);
+			}
+			//top_obj->tree.print_tree();
+
+			for (int i = 0; i < 48; ++i) {
+				key_sz = typeid(T) == typeid(char) ? (uint32_t)strlen((char*)(k + i)) + 1 : sizeof(T);
+				print_log("TREE_DELETE", k + i);
+				int ret = top_obj->tree.remove(k + i);
+				print_log("TREE_DELETE", k + i, ret);
+				//assert(!ret || ret == EUNIKEY);
+				top_obj->tree.print_tree();
+			}
+			/*
+			//consolidate root
+			rel_ptr<bz_node<T, uint64_t>> root(pmwcas_read(&top_obj->tree.root_));
+			int ret = root->consolidate<rel_ptr<T>>(&top_obj->tree,
+				rel_ptr<uint64_t>::null(), rel_ptr<uint64_t>::null());
+			root = rel_ptr<bz_node<T, uint64_t>>(pmwcas_read(&top_obj->tree.root_));
+			rel_ptr<bz_node<T, uint64_t>> left = root->nth_child(1);
+			ret = left->consolidate(&top_obj->tree, &root->status_, root->nth_val(1));
+			*/
+		}
 	}
 	void show_mem(pmem_layout * top_obj, int sz)
 	{
@@ -253,6 +282,7 @@ struct bz_test {
 		bool consolidate = false,
 		bool split = false,
 		bool merge = false,
+		bool tree_insert = false,
 		int sz = 32,
 		int concurrent = 16,
 		bool recovery = true) 
@@ -282,11 +312,12 @@ struct bz_test {
 				else
 					top_obj->data[i] = 10 * i;
 		}
-		tree.init(pop, top_oid);
+		if (tree.init(pop, top_oid))
+			assert(0);
 		if (recovery) {
 			tree.recovery();
 		}
-		if (first) {
+		if (first && !tree_insert) {
 			int ret = tree.new_root();
 			rel_ptr < bz_node<T, rel_ptr<T>>> root(top_obj->tree.root_);
 			assert(!ret && !root.is_null() && NODE_ALLOC_SIZE == get_node_size(root->length_));
@@ -311,7 +342,8 @@ struct bz_test {
 					typeid(T) == typeid(char) ? (T*)char_keys[index] : &keys[index], 
 					&vals[index],
 					write, dele, update, read, upsert, 
-					consolidate, split, merge);
+					consolidate, split, merge,
+					tree_insert);
 			}
 		for (int i = 0; i < sz * concurrent; ++i) {
 			t[i].join();
@@ -322,11 +354,13 @@ struct bz_test {
 			rel_ptr<bz_node<T, uint64_t>> root(top_obj->tree.root_);
 			uint64_t * meta_arr = root->rec_meta_arr();
 			int rec_cnt = get_record_count(root->status_);
-			show_mem(top_obj, rec_cnt);
 			if (typeid(T) == typeid(char))
 				range_scan(top_obj, (T*)char_keys[0], (T*)char_keys[9]);
 			else
 				range_scan(top_obj, &keys[0], &keys[63]);
+		}
+		if (tree_insert) {
+			top_obj->tree.print_tree();
 		}
 
 		// ’π§
@@ -383,8 +417,6 @@ struct pmwcas_test
 			}
 		for (int i = 0; i < test_num; ++i)
 			ts[i].join();
-
-		cout << top_obj->x[0] << endl;
 
 		pmwcas_finish(&top_obj->pool);
 		pmemobj_close(pop);

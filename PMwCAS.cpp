@@ -3,6 +3,7 @@
 #include "bzerrno.h"
 #include <thread>
 #include <atomic>
+#include <assert.h>
 
 #ifdef BZ_DEBUG
 #include <iomanip>
@@ -281,6 +282,7 @@ bool pmwcas_commit(mdesc_t mdesc)
 		while (true) {
 			/* try to install a pointer to mdesc for tha target word */
 			r = install_mdesc(wdesc);
+			uint64_t tmp = wdesc->expect;
 			if (r == wdesc->expect || (r & ADDR_MASK) == mdesc.rel()) {
 				/* successful CAS install or has been installed by another thread */
 				break;
@@ -355,6 +357,7 @@ uint64_t pmwcas_read(uint64_t * addr)
 		}
 		break;
 	}
+	assert(!(r & MwCAS_BIT || r & DIRTY_BIT || r & RDCSS_BIT));
 	return r;
 }
 
