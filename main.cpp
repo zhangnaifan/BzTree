@@ -14,14 +14,14 @@ int main() {
 		tcase.run(true, false, false, false, true, true, false, false, false, false, 6);
 		//split
 		cout << "split and merge" << endl;
-		tcase.run(false, false, false, false, false, false, false, true, true, false, 1, 1);
+		tcase.run(true, false, false, false, false, false, false, true, true, false, 1, 1);
 	}
 
 	for (int i = 0; i < 1; ++i) {
 		int test_cnt = 6;
 		//upsert
 		cout << "tree_insert" << endl;
-		tcase.run(true, false, false, false, false, false, false, false, false, true, 1, 4);
+		tcase.run(true, false, false, false, false, false, false, false, false, true, 1, 1);
 	}
 
 	for (int i = 0; i < 0; ++i) {

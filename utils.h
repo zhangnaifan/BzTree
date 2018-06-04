@@ -2,7 +2,8 @@
 #define UTILS_H
 #include <assert.h>
 #include <stdint.h>
-#include "PMwCAS.h"
+#include <libpmemobj.h>
+
 #define MAX_PATH_DEPTH	16
 
 struct bz_path_stack
@@ -47,32 +48,28 @@ struct bz_node_block {
 	POBJ_LIST_ENTRY(struct bz_node_block) entry;
 };
 
-int node_construct(PMEMobjpool *pop, void *ptr, void *arg)
-{
-	uint32_t node_sz = *(uint32_t*)arg;
-	rel_ptr<bz_node<uint64_t, uint64_t>> node((bz_node<uint64_t, uint64_t>*)((char*)ptr + sizeof(bz_node_block)));
-	set_node_size(node->length_, node_sz);
-	return 0;
-}
-
 struct bz_memory_pool {
-	POBJ_LIST_HEAD(bz_node_list, struct bz_node_block) head_;
-	PMEMmutex lock;
+	PMEMmutex mem_lock;
 	PMEMobjpool * pop_;
-
-	void init(PMEMobjpool *pop) {
+	void init(PMEMobjpool *pop, PMEMoid base_oid) {
 		pop_ = pop;
+		rel_ptr<uint64_t>::set_base(base_oid);
+		rel_ptr<rel_ptr<uint64_t>>::set_base(base_oid);
 	}
-	void prev_alloc(size_t num_blks) {
+	
+#ifndef IS_PMEM
+
+	POBJ_LIST_HEAD(bz_node_list, struct bz_node_block) head_;
+	void prev_alloc() {
 		uint32_t node_sz = NODE_ALLOC_SIZE;
-		for (size_t i = 0; i < num_blks; ++i) {
+		for (size_t i = 0; i < PRE_ALLOC_NUM; ++i) {
 			POBJ_LIST_INSERT_NEW_TAIL(pop_, &head_, entry,
 				sizeof(bz_node_block) + NODE_ALLOC_SIZE,
-				node_construct, (void*)&node_sz);
+				NULL, NULL);
 		}
 	}
 	void acquire(rel_ptr<rel_ptr<uint64_t>> ptr) {
-		pmemobj_mutex_lock(pop_, &lock);
+		pmemobj_mutex_lock(pop_, &mem_lock);
 		TOID(struct bz_node_block) front = POBJ_LIST_FIRST(&head_);
 		if (!TOID_IS_NULL(front)) {
 			TX_BEGIN(pop_) {
@@ -88,10 +85,10 @@ struct bz_memory_pool {
 				*ptr = (uint64_t*)((char*)pmemobj_direct(oid) + sizeof(bz_node_block));
 			} TX_END;
 		}
-		pmemobj_mutex_unlock(pop_, &lock);
+		pmemobj_mutex_unlock(pop_, &mem_lock);
 	}
 	void release(rel_ptr<rel_ptr<uint64_t>> ptr) {
-		pmemobj_mutex_lock(pop_, &lock);
+		pmemobj_mutex_lock(pop_, &mem_lock);
 		PMEMoid oid = ptr->oid();
 		//right?
 		oid.off -= sizeof(bz_node_block);
@@ -102,8 +99,55 @@ struct bz_memory_pool {
 			POBJ_LIST_INSERT_TAIL(pop_, &head_, back, entry);
 			*ptr = rel_ptr<uint64_t>();
 		} TX_END;
-		pmemobj_mutex_unlock(pop_, &lock);
+		pmemobj_mutex_unlock(pop_, &mem_lock);
 	}
+
+#else
+	
+	uint32_t front_, back_;
+	uint64_t nodes[MAX_ALLOC_NUM];
+	void prev_alloc() {
+		front_ = back_ = 0;
+		for (int i = 0; i < PRE_ALLOC_NUM; ++i) {
+			PMEMoid oid;
+			pmemobj_alloc(pop_, &oid, NODE_ALLOC_SIZE, TOID_TYPE_NUM(struct bz_node_block), NULL, NULL);
+			assert(!OID_IS_NULL(oid));
+			nodes[back_] = rel_ptr<uint64_t>(oid).rel();
+			pmem_persist(&nodes[back_], sizeof(uint64_t));
+			++back_;
+		}
+		pmem_persist(&front_, sizeof(uint32_t));
+		pmem_persist(&back_, sizeof(uint32_t));
+	}
+	void acquire(rel_ptr<rel_ptr<uint64_t>> ptr) {
+		pmemobj_mutex_lock(pop_, &mem_lock);
+		if (front_ == back_) {
+			PMEMoid oid;
+			pmemobj_alloc(pop_, &oid, NODE_ALLOC_SIZE, TOID_TYPE_NUM(struct bz_node_block), NULL, NULL);
+			assert(!OID_IS_NULL(oid));
+			*ptr = rel_ptr<uint64_t>(oid);
+		}
+		else {
+			*ptr = rel_ptr<uint64_t>(nodes[front_]);
+			front_ = (front_ + 1) % MAX_ALLOC_NUM;
+			pmem_persist(&front_, sizeof(uint32_t));
+		}
+		pmem_persist(ptr.abs(), sizeof(uint64_t));
+		pmemobj_mutex_unlock(pop_, &mem_lock);
+	}
+	void release(rel_ptr<rel_ptr<uint64_t>> ptr) {
+		pmemobj_mutex_lock(pop_, &mem_lock);
+		nodes[back_] = ptr->rel();
+		*ptr = rel_ptr<uint64_t>();
+		back_ = (back_ + 1) % MAX_ALLOC_NUM;
+		assert(back_ != front_);
+		pmem_persist(ptr.abs(), sizeof(uint64_t));
+		pmem_persist(&back_, sizeof(uint32_t));
+		pmemobj_mutex_unlock(pop_, &mem_lock);
+	}
+
+#endif // !IS_PMEM
+
 };
 
 #endif // !UTILS_H

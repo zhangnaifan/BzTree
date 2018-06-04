@@ -1,15 +1,3 @@
-/*
-* Copyright (c) 2015-2018 Mindaugas Rasiukevicius <rmind at noxt eu>
-* All rights reserved.
-*
-* Use is subject to license terms, as specified in the LICENSE file.
-*/
-
-/*
-* Garbage Collection (G/C) interface for multi-threaded environment,
-* using the Epoch-based reclamation (EBR) mechanism.
-*/
-
 #include <assert.h>
 #include <thread>
 
@@ -46,7 +34,7 @@ gc_create(unsigned off, gc_func_t reclaim, void *arg)
 	gc->entry_off = off;
 	if (reclaim) {
 		gc->reclaim = reclaim;
-		if (gc->arg != nullptr) {
+		if (arg != nullptr) {
 			gc->arg = arg;
 		} 
 		else {

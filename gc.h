@@ -1,10 +1,3 @@
-/*
-* Copyright (c) 2015 Mindaugas Rasiukevicius <rmind at noxt eu>
-* All rights reserved.
-*
-* Use is subject to license terms, as specified in the LICENSE file.
-*/
-
 #ifndef _GC_H_
 #define _GC_H_
 

@@ -1,32 +1,3 @@
-/*
-* Copyright (c) 2016-2018 Mindaugas Rasiukevicius <rmind at noxt eu>
-* All rights reserved.
-*
-* Use is subject to license terms, as specified in the LICENSE file.
-*/
-
-/*
-* Epoch-based reclamation (EBR).  Reference:
-*
-*	K. Fraser, Practical lock-freedom,
-*	Technical Report UCAM-CL-TR-579, February 2004
-*	https://www.cl.cam.ac.uk/techreports/UCAM-CL-TR-579.pdf
-*
-* Summary:
-*
-* Any workers (threads or processes) actively referencing (accessing)
-* the globally visible objects must do that in the critical path covered
-* using the dedicated enter/exit functions.  The grace period is
-* determined using "epochs" -- implemented as a global counter (and,
-* for example, a dedicated G/C list for each epoch).  Objects in the
-* current global epoch can be staged for reclamation (garbage collection).
-* Then, the objects in the target epoch can be reclaimed after two
-* successful increments of the global epoch.  Only three epochs are
-* needed (e, e-1 and e-2), therefore we use clock arithmetics.
-*
-* See the comments in the ebr_sync() function for detailed explanation.
-*/
-
 #include <assert.h>
 #include <atomic>
 #include "PMwCAS.h"

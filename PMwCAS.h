@@ -6,11 +6,12 @@
 #include "bzconfig.h"
 #include "rel_ptr.h"
 #include "gc.h"
+#include "utils.h"
 
 #ifdef IS_PMEM
 #define persist		pmem_persist
 #else
-#define persit		pmem_msync
+#define persist		pmem_msync
 #endif // IS_PMEM
 
 #define RDCSS_BIT		0x8000000000000000
@@ -26,6 +27,7 @@
 #define RELEASE_NEW_ON_FAILED	1
 #define RELEASE_EXP_ON_SUCCESS	2
 #define RELEASE_SWAP_PTR		3 //release new on failed and release expect on success
+#define RELEASE_ADDR_ON_SUCCESS	4 //only for temporily store memory ptr
 
 #define EXCHANGE		InterlockedExchange
 #define CAS				InterlockedCompareExchange
@@ -64,20 +66,21 @@ struct pmwcas_pool
 	gc_t *			gc;
 	pmwcas_entry	mdescs[DESCRIPTOR_POOL_SIZE];
 	uint64_t		magic[WORD_DESCRIPTOR_SIZE];
+	bz_memory_pool  mem_;
 };
 
 /* 
 * 第一次使用pmwcas时调用
 * 初始化描述符状态
 */
-void pmwcas_first_use(mdesc_pool_t pool);
+void pmwcas_first_use(mdesc_pool_t pool, PMEMobjpool * pop, PMEMoid oid);
 
 /*
 * 每次重启时首先调用
 * 设置相对指针的基地址
 * 创建G/C和回收线程
 */
-int pmwcas_init(mdesc_pool_t pool, PMEMoid oid);
+int pmwcas_init(mdesc_pool_t pool, PMEMoid oid, PMEMobjpool * pop);
 
 /*
 * 结束时调用
@@ -116,7 +119,7 @@ rel_ptr<uint64_t> get_magic(mdesc_pool_t pool, int i);
 void pmwcas_free(mdesc_t mdesc);
 
 /* 执行释放函数 */
-void pmwcas_word_recycle(rel_ptr<uint64_t> ptr_leak);
+void pmwcas_word_recycle(mdesc_pool_t pool, rel_ptr<rel_ptr<uint64_t>> ptr_leak);
 /*
 * 向PMwCAS描述符添加一个CAS字段
 * 返回成功/失败

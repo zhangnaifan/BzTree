@@ -18,7 +18,7 @@ struct bz_test {
 	struct pmem_layout
 	{
 		bz_tree<T, rel_ptr<T>> tree;
-		T data[64 * 8];
+		T data[10000 * 8];
 	};
 
 	void print_log(const char * action, T * k, int ret = -1, bool pr = true) {
@@ -191,7 +191,7 @@ struct bz_test {
 			assert(ret);
 		}
 		if (tree_insert) {
-			for (int i = 0; i < 48; ++i) {
+			for (int i = 0; i < 9500; ++i) {
 				key_sz = typeid(T) == typeid(char) ? (uint32_t)strlen((char*)(k+i)) + 1 : sizeof(T);
 				print_log("TREE_INSERT", k + i);
 				int ret = top_obj->tree.insert(k + i, v + i, key_sz, key_sz + 8);
@@ -200,14 +200,16 @@ struct bz_test {
 			}
 			//top_obj->tree.print_tree();
 
-			for (int i = 0; i < 48; ++i) {
+			for (int i = 0; i < 5000; ++i) {
 				key_sz = typeid(T) == typeid(char) ? (uint32_t)strlen((char*)(k + i)) + 1 : sizeof(T);
 				print_log("TREE_DELETE", k + i);
 				int ret = top_obj->tree.remove(k + i);
 				print_log("TREE_DELETE", k + i, ret);
 				//assert(!ret || ret == EUNIKEY);
-				top_obj->tree.print_tree();
+				//top_obj->tree.print_tree();
 			}
+			//top_obj->tree.print_tree(true);
+
 			/*
 			//consolidate root
 			rel_ptr<bz_node<T, uint64_t>> root(pmwcas_read(&top_obj->tree.root_));
@@ -305,8 +307,8 @@ struct bz_test {
 		auto &tree = top_obj->tree;
 
 		if (first) {
-			tree.first_use();
-			for (int i = 0; i < 64; ++i)
+			tree.first_use(pop, top_oid);
+			for (int i = 0; i < 10000; ++i)
 				if (typeid(T) == typeid(char))
 					_itoa(10 * i, (char*)top_obj->data + i * 8, 10);
 				else
@@ -323,10 +325,10 @@ struct bz_test {
 			assert(!ret && !root.is_null() && NODE_ALLOC_SIZE == get_node_size(root->length_));
 		}
 
-		char *char_keys[64];
-		T keys[64];
-		rel_ptr<T> vals[64];
-		for (int i = 0; i < 64; ++i) {
+		char *char_keys[10000];
+		T keys[10000];
+		rel_ptr<T> vals[10000];
+		for (int i = 0; i < 10000; ++i) {
 			char_keys[i] = new char[10];
 			_itoa(i, char_keys[i], 10);
 			keys[i] = i;
@@ -364,7 +366,7 @@ struct bz_test {
 		}
 
 		//ÊÕ¹¤
-		for (int i = 0; i < 64; ++i) {
+		for (int i = 0; i < 10000; ++i) {
 			delete[] char_keys[i];
 		}
 		tree.finish();
@@ -402,8 +404,8 @@ struct pmwcas_test
 		auto pop = pmemobj_createU(fname, "layout", PMEMOBJ_MIN_POOL, 0666);
 		auto top_oid = pmemobj_root(pop, sizeof(pmwcas_layout));
 		auto top_obj = (pmwcas_layout *)pmemobj_direct(top_oid);
-		pmwcas_first_use(&top_obj->pool);
-		pmwcas_init(&top_obj->pool, top_oid);
+		pmwcas_first_use(&top_obj->pool, pop, top_oid);
+		pmwcas_init(&top_obj->pool, top_oid, pop);
 		
 		int test_num = sz * concurrent;
 
