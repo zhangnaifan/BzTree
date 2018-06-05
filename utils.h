@@ -136,6 +136,8 @@ struct bz_memory_pool {
 		pmemobj_mutex_unlock(pop_, &mem_lock);
 	}
 	void release(rel_ptr<rel_ptr<uint64_t>> ptr) {
+		if (ptr->is_null())
+			return;
 		pmemobj_mutex_lock(pop_, &mem_lock);
 		nodes[back_] = ptr->rel();
 		*ptr = rel_ptr<uint64_t>();

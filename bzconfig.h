@@ -2,15 +2,15 @@
 #define BZCONFIG_H
 
 #define IS_PMEM		
-#define BZ_DEBUG
+//#define BZ_DEBUG
 
 #define PRE_ALLOC_NUM			128
 #define MAX_ALLOC_NUM			1024
 
 #define DESCRIPTOR_POOL_SIZE	4096
-#define WORD_DESCRIPTOR_SIZE	6
-#define CALLBACK_SIZE			4
+#define WORD_DESCRIPTOR_SIZE	10
 
+#define GC_THREADS_COUNT		10
 #define GC_WAIT_MS				10
 
 #ifdef BZ_TEST

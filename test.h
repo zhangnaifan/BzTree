@@ -13,7 +13,12 @@
 using namespace std;
 
 template<typename T>
-struct bz_test {
+struct performance_test {
+
+};
+
+template<typename T>
+struct unit_test {
 	atomic<bool> flag = false;
 	struct pmem_layout
 	{
@@ -21,7 +26,13 @@ struct bz_test {
 		T data[10000 * 8];
 	};
 
-	void print_log(const char * action, T * k, int ret = -1, bool pr = true) {
+	void print_log(const char * action, T * k, int ret = -1, bool pr = 
+#ifdef BZ_DEBUG
+		true
+#else
+		false
+#endif
+	) {
 		if (!pr)
 			return;
 		while (flag.exchange(true)) {
@@ -46,7 +57,7 @@ struct bz_test {
 	void pmem_worker(pmem_layout * top_obj, T * k, rel_ptr<T> *v,
 		bool write, bool dele, bool update, bool read, bool upsert, 
 		bool consolidate, bool split, bool merge,
-		bool tree_insert) 
+		bool tree_insert, int rec_cnt) 
 	{
 		uint32_t key_sz = typeid(T) == typeid(char) ? (uint32_t)strlen((char*)k) + 1 : sizeof(T);
 		rel_ptr < bz_node<T, rel_ptr<T>>> root(top_obj->tree.root_);
@@ -191,7 +202,7 @@ struct bz_test {
 			assert(ret);
 		}
 		if (tree_insert) {
-			for (int i = 0; i < 9500; ++i) {
+			for (int i = 0; i < rec_cnt; ++i) {
 				key_sz = typeid(T) == typeid(char) ? (uint32_t)strlen((char*)(k+i)) + 1 : sizeof(T);
 				print_log("TREE_INSERT", k + i);
 				int ret = top_obj->tree.insert(k + i, v + i, key_sz, key_sz + 8);
@@ -200,7 +211,7 @@ struct bz_test {
 			}
 			//top_obj->tree.print_tree();
 
-			for (int i = 0; i < 5000; ++i) {
+			for (int i = 0; i < rec_cnt / 2; ++i) {
 				key_sz = typeid(T) == typeid(char) ? (uint32_t)strlen((char*)(k + i)) + 1 : sizeof(T);
 				print_log("TREE_DELETE", k + i);
 				int ret = top_obj->tree.remove(k + i);
@@ -208,17 +219,42 @@ struct bz_test {
 				//assert(!ret || ret == EUNIKEY);
 				//top_obj->tree.print_tree();
 			}
-			//top_obj->tree.print_tree(true);
+			//top_obj->tree.print_tree();
+			
+			for (int i = rec_cnt / 2; i < rec_cnt; ++i) {
+				key_sz = typeid(T) == typeid(char) ? (uint32_t)strlen((char*)(k + i)) + 1 : sizeof(T);
+				print_log("TREE_UPDATE", k + i);
+				int ret = top_obj->tree.update(k + i, v + i + 1, key_sz, key_sz + 8);
+				print_log("TREE_UPDATE", k + i, ret);
+			}
+			//top_obj->tree.print_tree();
 
-			/*
-			//consolidate root
-			rel_ptr<bz_node<T, uint64_t>> root(pmwcas_read(&top_obj->tree.root_));
-			int ret = root->consolidate<rel_ptr<T>>(&top_obj->tree,
-				rel_ptr<uint64_t>::null(), rel_ptr<uint64_t>::null());
-			root = rel_ptr<bz_node<T, uint64_t>>(pmwcas_read(&top_obj->tree.root_));
-			rel_ptr<bz_node<T, uint64_t>> left = root->nth_child(1);
-			ret = left->consolidate(&top_obj->tree, &root->status_, root->nth_val(1));
-			*/
+			for (int i = 0; i < rec_cnt; ++i) {
+				key_sz = typeid(T) == typeid(char) ? (uint32_t)strlen((char*)(k + i)) + 1 : sizeof(T);
+				print_log("TREE_UPSERT", k + i);
+				int ret = top_obj->tree.upsert(k + i, v + i + 2, key_sz, key_sz + 8);
+				print_log("TREE_UPSERT", k + i, ret);
+			}
+			//top_obj->tree.print_tree();
+
+			for (int i = 0; i < rec_cnt; ++i) {
+				key_sz = typeid(T) == typeid(char) ? (uint32_t)strlen((char*)(k + i)) + 1 : sizeof(T);
+				print_log("TREE_READ", k + i);
+				rel_ptr<T> buffer;
+				int ret = top_obj->tree.read(k + i, &buffer, 8);
+				print_log("TREE_READ", k + i, ret);
+				if (!ret) {
+					if (typeid(T) == typeid(char)) {
+						print_log("READ", (T*)buffer.abs());
+						//assert(!strcmp((char*)buffer.abs(), (char*)(v + i + 2)->abs()));
+					}
+					else {
+						print_log("READ", k + i, *buffer);
+						//assert(*buffer == **(v + i + 2));
+					}
+				}
+			}
+			//top_obj->tree.print_tree();
 		}
 	}
 	void show_mem(pmem_layout * top_obj, int sz)
@@ -285,6 +321,7 @@ struct bz_test {
 		bool split = false,
 		bool merge = false,
 		bool tree_insert = false,
+		int rec_cnt = 10000,
 		int sz = 32,
 		int concurrent = 16,
 		bool recovery = true) 
@@ -293,7 +330,7 @@ struct bz_test {
 		PMEMobjpool * pop;
 		if (first) {
 			remove(fname);
-			pop = pmemobj_createU(fname, "layout", PMEMOBJ_MIN_POOL * 10, 0666);
+			pop = pmemobj_createU(fname, "layout", PMEMOBJ_MIN_POOL * 20, 0666);
 		}
 		else
 		{
@@ -339,13 +376,13 @@ struct bz_test {
 			for (int j = 0; j < concurrent; ++j)
 			{
 				int index = i + j > sz - 1 ? sz - 1 : i + j;
-				t[i * concurrent + j] = thread(&bz_test::pmem_worker,
+				t[i * concurrent + j] = thread(&unit_test::pmem_worker,
 					this, top_obj, 
 					typeid(T) == typeid(char) ? (T*)char_keys[index] : &keys[index], 
 					&vals[index],
 					write, dele, update, read, upsert, 
 					consolidate, split, merge,
-					tree_insert);
+					tree_insert, rec_cnt);
 			}
 		for (int i = 0; i < sz * concurrent; ++i) {
 			t[i].join();

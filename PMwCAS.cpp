@@ -58,16 +58,24 @@ int pmwcas_init(mdesc_pool_t pool, PMEMoid oid, PMEMobjpool * pop)
 	/* init mem_pool */
 	pool->mem_.init(pop, oid);
 	/* 创建GC线程 */
-	std::thread gc([pool] {
-		gc_alive = GC_CAN_QUIT;
-		while (GC_QUIT != CAS(&gc_alive, GC_BUSY, GC_CAN_QUIT)) {
-			assert(pool->gc);
-			gc_cycle(pool->gc);
-			CAS(&gc_alive, GC_CAN_QUIT, GC_BUSY);
-			std::this_thread::sleep_for(std::chrono::milliseconds(GC_WAIT_MS));
-		}
-	});
-	gc.detach();
+	gc_alive = GC_CAN_QUIT;
+	for (int i = 0; i < GC_THREADS_COUNT; ++i) {
+		std::thread gc([pool] {
+			uint64_t gc_rd;
+			while (true) {
+				do {
+					gc_rd = CAS(&gc_alive, GC_BUSY, GC_CAN_QUIT);
+				} while (gc_rd == GC_BUSY);
+				if (gc_rd == GC_QUIT)
+					break;
+				assert(pool->gc);
+				gc_cycle(pool->gc);
+				CAS(&gc_alive, GC_CAN_QUIT, GC_BUSY);
+				std::this_thread::sleep_for(std::chrono::milliseconds(GC_WAIT_MS));
+			}
+		});
+		gc.detach();
+	}
 	return 0;
 }
 
@@ -98,9 +106,6 @@ mdesc_t pmwcas_alloc(mdesc_pool_t pool, off_t recycle_policy, off_t search_pos)
 				persist((uint64_t*)&pool->mdescs[pos].count, sizeof(uint64_t));
 				pool->mdescs[pos].callback = recycle_policy;
 				persist((uint64_t*)&pool->mdescs[pos].callback, sizeof(uint64_t));
-				//GC初始化
-				//gc_register(pool->gc);
-				//gc_crit_enter(pool->gc);
 				return &pool->mdescs[pos];
 			}
 		}
@@ -113,9 +118,9 @@ bool pmwcas_abort(mdesc_t mdesc)
 	return ST_UNDECIDED == CAS(&mdesc->status, ST_FREE, ST_UNDECIDED);
 }
 
-rel_ptr<uint64_t> get_magic(mdesc_pool_t pool, int i) 
-{ 
-	return &pool->magic[i]; 
+rel_ptr<uint64_t> get_magic(mdesc_pool_t pool, int magic)
+{
+	return rel_ptr<uint64_t>(&pool->magic[magic]);
 }
 
 /* exit crit; add PMwCAS entry to gc list */
@@ -142,21 +147,30 @@ void pmwcas_reclaim(gc_entry_t *entry, void *arg)
 			bool done = mdesc->status == ST_SUCCESS;
 			uint64_t val = done ? wdesc->new_val : wdesc->expect;
 
+
 			/* 根据回收规则回收 */
-			if (wdesc->recycle_func == RELEASE_NEW_ON_FAILED
-				|| wdesc->recycle_func == RELEASE_SWAP_PTR) {
-				/* 未成功时回收new */
-				if (!done && wdesc->new_val) {
-					pmwcas_word_recycle(pool, (rel_ptr<uint64_t>*)&wdesc->new_val);
-				}
+			if (wdesc->recycle_func == NOCAS_RELEASE_ADDR_ON_SUCCESS
+				&& done && !wdesc->addr.is_null()) {
+				pmwcas_word_recycle(pool, &wdesc->addr);
 			}
-			else if ((wdesc->recycle_func == RELEASE_EXP_ON_SUCCESS || wdesc->recycle_func == RELEASE_SWAP_PTR)
+			else if (wdesc->recycle_func == NOCAS_EXECUTE_ON_FAILED
+				&& !done) {
+				CAS(wdesc->addr.abs(), wdesc->new_val, wdesc->expect);
+			}
+			else if (wdesc->recycle_func == NOCAS_RELEASE_NEW_ON_FAILED
+				&& !done && wdesc->new_val) {
+				pmwcas_word_recycle(pool, (rel_ptr<uint64_t>*)&wdesc->new_val);
+			}
+			if ((wdesc->recycle_func == RELEASE_NEW_ON_FAILED
+				|| wdesc->recycle_func == RELEASE_SWAP_PTR)
+				&& !done && wdesc->new_val) {
+				pmwcas_word_recycle(pool, (rel_ptr<uint64_t>*)&wdesc->new_val);
+			}
+			if ((wdesc->recycle_func == RELEASE_EXP_ON_SUCCESS
+				|| wdesc->recycle_func == RELEASE_SWAP_PTR)
 				&& done && wdesc->expect) {
 				/* 成功时回收expect */
 				pmwcas_word_recycle(pool, (rel_ptr<uint64_t>*)&wdesc->expect);
-			}
-			else if (done && wdesc->recycle_func == RELEASE_ADDR_ON_SUCCESS && !wdesc->addr.is_null()) {
-				pmwcas_word_recycle(pool, &wdesc->addr);
 			}
 		}
 		/* we have persist all the target words to the correct state */
@@ -184,53 +198,38 @@ void pmwcas_word_recycle(mdesc_pool_t pool, rel_ptr<rel_ptr<uint64_t>> ptr_leak)
 */
 bool pmwcas_add(mdesc_t mdesc, rel_ptr<uint64_t> addr, uint64_t expect, uint64_t new_val, off_t recycle) 
 {
-	off_t insert_point = (off_t)mdesc->count, i;
-	wdesc_t wdesc = mdesc->wdescs;
 	/* check if PMwCAS is full */
 	if (mdesc->count == WORD_DESCRIPTOR_SIZE)
 	{
+		assert(0);
 		return false;
 	}
 	/* 
 	* check if the target address exists
 	* otherwise, find the insert point 
 	*/
-	for (i = 0; i < mdesc->count; ++i)
+	for (off_t i = 0; i < mdesc->count; ++i)
 	{
-		wdesc = mdesc->wdescs + i;
+		wdesc_t wdesc = mdesc->wdescs + i;
 		if (wdesc->addr == addr)
 		{
+			assert(0);
 			return false;
 		}
-		if (wdesc->addr > addr && insert_point > i)
-		{
-			insert_point = i;
-		}
 	}
-	if (insert_point != mdesc->count)
-		memmove(mdesc->wdescs + insert_point + 1,
-			mdesc->wdescs + insert_point, 
-			(mdesc->count - insert_point) * sizeof(*mdesc->wdescs));
+	wdesc_t wdesc = mdesc->wdescs + mdesc->count;
 		
-	mdesc->wdescs[insert_point].addr = addr;
-	mdesc->wdescs[insert_point].expect = expect;
-	mdesc->wdescs[insert_point].new_val = new_val;
-	mdesc->wdescs[insert_point].mdesc = mdesc;
-	mdesc->wdescs[insert_point].recycle_func = !recycle ? mdesc->callback : recycle;
+	wdesc->addr = addr;
+	wdesc->expect = expect;
+	wdesc->new_val = new_val;
+	wdesc->mdesc = mdesc;
+	wdesc->recycle_func = !recycle ? mdesc->callback : recycle;
+	persist(wdesc.abs(), sizeof(*wdesc));
 
 	++mdesc->count;
+	persist(&mdesc->count, sizeof(uint64_t));
 	return true;
 }
-
-/* 
-* add a word desc to PMwCAS desc
-* expect and new_val are rel_ptr
-
-bool pmwcas_add(mdesc_t mdesc, rel_ptr<uint64_t> addr, rel_ptr<uint64_t> expect, rel_ptr<uint64_t> new_val, off_t recycle)
-{
-	return pmwcas_add(mdesc, addr, expect.rel(), new_val.rel(), recycle);
-}
-*/
 
 inline bool is_RDCSS(uint64_t val)
 {
@@ -282,12 +281,36 @@ inline uint64_t install_mdesc(wdesc_t wdesc)
 	return r;
 }
 
+void sort_addr(off_t arr[], mdesc_t mdesc) {
+	for (off_t i = 0; i < mdesc->count; ++i) {
+		arr[i] = i;
+	}
+	for (int i = 0; i < mdesc->count; ++i) {
+		int cur_min_pos = i;
+		rel_ptr<uint64_t> cur_min(mdesc->wdescs[arr[i]].addr);
+		for (int j = i + 1; j < mdesc->count; ++j)
+			if (mdesc->wdescs[arr[j]].addr < cur_min) {
+				cur_min = mdesc->wdescs[arr[j]].addr;
+				cur_min_pos = j;
+			}
+		if (cur_min_pos != i) {
+			off_t tmp = arr[cur_min_pos];
+			arr[cur_min_pos] = arr[i];
+			arr[i] = tmp;
+		}
+	}
+}
+
 bool pmwcas_commit(mdesc_t mdesc)
 {
 	uint64_t status = ST_SUCCESS;
+	off_t index[WORD_DESCRIPTOR_SIZE];
+	sort_addr(index, mdesc);
 	for (off_t i = 0; status == ST_SUCCESS && i < mdesc->count; ++i) {
-		wdesc_t wdesc = mdesc->wdescs + i;
-		if (wdesc->recycle_func == RELEASE_ADDR_ON_SUCCESS)
+		wdesc_t wdesc = mdesc->wdescs + index[i];
+		if (wdesc->recycle_func == NOCAS_RELEASE_ADDR_ON_SUCCESS
+			|| wdesc->recycle_func == NOCAS_EXECUTE_ON_FAILED
+			|| wdesc->recycle_func == NOCAS_RELEASE_NEW_ON_FAILED)
 			continue;
 		uint64_t r;
 		while (true) {
@@ -320,8 +343,10 @@ bool pmwcas_commit(mdesc_t mdesc)
 	*/
 	if (status == ST_SUCCESS) {
 		for (off_t i = 0; i < mdesc->count; ++i) {
-			wdesc_t wdesc = mdesc->wdescs + i;
-			if (wdesc->recycle_func == RELEASE_ADDR_ON_SUCCESS)
+			wdesc_t wdesc = mdesc->wdescs + index[i];
+			if (wdesc->recycle_func == NOCAS_RELEASE_ADDR_ON_SUCCESS
+				|| wdesc->recycle_func == NOCAS_EXECUTE_ON_FAILED
+				|| wdesc->recycle_func == NOCAS_RELEASE_NEW_ON_FAILED)
 				continue;
 			persist_clear(wdesc->addr.abs(), mdesc_ptr);
 		}
@@ -333,8 +358,10 @@ bool pmwcas_commit(mdesc_t mdesc)
 
 	/* install the final value for each word */
 	for (off_t i = 0; i < mdesc->count; ++i) {
-		wdesc_t wdesc = mdesc->wdescs + i;
-		if (wdesc->recycle_func == RELEASE_ADDR_ON_SUCCESS)
+		wdesc_t wdesc = mdesc->wdescs + index[i];
+		if (wdesc->recycle_func == NOCAS_RELEASE_ADDR_ON_SUCCESS
+			|| wdesc->recycle_func == NOCAS_EXECUTE_ON_FAILED
+			|| wdesc->recycle_func == NOCAS_RELEASE_NEW_ON_FAILED)
 			continue;
 		uint64_t val = 
 			(mdesc->status == ST_SUCCESS ? wdesc->new_val : wdesc->expect) | DIRTY_BIT;
@@ -416,12 +443,6 @@ void pmwcas_recovery(mdesc_pool_t pool)
 			wdesc_t wdesc = mdesc->wdescs + j;
 			uint64_t r, val = done ? wdesc->new_val : wdesc->expect;
 
-			//回收
-			if (done && wdesc->recycle_func == RELEASE_ADDR_ON_SUCCESS && !wdesc->addr.is_null()) {
-				pmwcas_word_recycle(pool, &wdesc->addr);
-				continue;
-			}
-
 			/* case (3) when dirty bit set */
 			r = CAS(wdesc->addr.abs(), val, mdesc_ptr);
 			/* case (3) when the dirty bit unset */
@@ -442,13 +463,26 @@ void pmwcas_recovery(mdesc_pool_t pool)
 			persist(wdesc->addr.abs(), sizeof(*wdesc->addr));
 
 			/* 根据回收规则回收 */
-			if (wdesc->recycle_func == 1) {
-				/* 未成功时回收new */
-				if (!done && wdesc->new_val) {
-					pmwcas_word_recycle(pool, (rel_ptr<uint64_t>*)&wdesc->new_val);
-				}
+			if (wdesc->recycle_func == NOCAS_RELEASE_ADDR_ON_SUCCESS 
+				&& done && !wdesc->addr.is_null()) {
+				pmwcas_word_recycle(pool, &wdesc->addr);
 			}
-			else if (wdesc->recycle_func == 2 && done && wdesc->expect) {
+			else if (wdesc->recycle_func == NOCAS_EXECUTE_ON_FAILED
+				&& !done) {
+				CAS(wdesc->addr.abs(), wdesc->new_val, wdesc->expect);
+			}
+			else if (wdesc->recycle_func == NOCAS_RELEASE_NEW_ON_FAILED
+				&& !done && wdesc->new_val) {
+				pmwcas_word_recycle(pool, (rel_ptr<uint64_t>*)&wdesc->new_val);
+			}
+			else if ((wdesc->recycle_func == RELEASE_NEW_ON_FAILED
+				|| wdesc->recycle_func == RELEASE_SWAP_PTR)
+				&& !done && wdesc->new_val) {
+				pmwcas_word_recycle(pool, (rel_ptr<uint64_t>*)&wdesc->new_val);
+			}
+			else if ((wdesc->recycle_func == RELEASE_EXP_ON_SUCCESS
+				|| wdesc->recycle_func == RELEASE_SWAP_PTR) 
+				&& done && wdesc->expect) {
 				/* 成功时回收expect */
 				pmwcas_word_recycle(pool, (rel_ptr<uint64_t>*)&wdesc->expect);
 			}

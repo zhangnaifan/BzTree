@@ -24,10 +24,12 @@
 #define ST_FAILED		2
 #define ST_FREE			3
 
-#define RELEASE_NEW_ON_FAILED	1
-#define RELEASE_EXP_ON_SUCCESS	2
-#define RELEASE_SWAP_PTR		3 //release new on failed and release expect on success
-#define RELEASE_ADDR_ON_SUCCESS	4 //only for temporily store memory ptr
+#define RELEASE_NEW_ON_FAILED			1
+#define RELEASE_EXP_ON_SUCCESS			2
+#define RELEASE_SWAP_PTR				3 //release new on failed and release expect on success
+#define NOCAS_RELEASE_ADDR_ON_SUCCESS	4 //no CAS performed, only used to reclaim memories pointed to by field addr
+#define NOCAS_EXECUTE_ON_FAILED			5 //no CAS performed, only used to execute CAS after failure, e.g. unfreeze node when power failure
+#define NOCAS_RELEASE_NEW_ON_FAILED		6 //no CAS performed, only used to reclaim memoried pointed to by field new_val
 
 #define EXCHANGE		InterlockedExchange
 #define CAS				InterlockedCompareExchange
@@ -65,8 +67,8 @@ struct pmwcas_pool
 	//recycle_func_t		callbacks[CALLBACK_SIZE];
 	gc_t *			gc;
 	pmwcas_entry	mdescs[DESCRIPTOR_POOL_SIZE];
-	uint64_t		magic[WORD_DESCRIPTOR_SIZE];
 	bz_memory_pool  mem_;
+	uint64_t		magic[WORD_DESCRIPTOR_SIZE];
 };
 
 /* 
@@ -110,7 +112,8 @@ mdesc_t pmwcas_alloc(mdesc_pool_t pool, off_t recycle_policy = 0, off_t search_p
 * 用于暂时保管分配的内存，以便于系统断电后回收
 */
 bool pmwcas_abort(mdesc_t mdesc);
-rel_ptr<uint64_t> get_magic(mdesc_pool_t pool, int i);
+
+rel_ptr<uint64_t> get_magic(mdesc_pool_t pool, int magic);
 
 /*
 * 每次执行完PMwCAS之后调用
@@ -156,42 +159,37 @@ parent->child[0] = new node();
 template<typename T>
 rel_ptr<rel_ptr<T>> pmwcas_reserve(mdesc_t mdesc, rel_ptr<rel_ptr<T>> addr, rel_ptr<T> expect, off_t recycle = 0)
 {
-	off_t insert_point = (off_t)mdesc->count, i;
-	wdesc_t wdesc = mdesc->wdescs;
 	/* check if PMwCAS is full */
 	if (mdesc->count == WORD_DESCRIPTOR_SIZE)
 	{
-		return false;
+		assert(0);
+		return rel_ptr<rel_ptr<T>>::null();
 	}
 	/*
 	* check if the target address exists
 	* otherwise, find the insert point
 	*/
-	for (i = 0; i < mdesc->count; ++i)
+	for (off_t i = 0; i < mdesc->count; ++i)
 	{
-		wdesc = mdesc->wdescs + i;
+		wdesc_t wdesc = mdesc->wdescs + i;
 		if (wdesc->addr == addr)
 		{
-			return nullptr;
-		}
-		if (wdesc->addr > addr && insert_point > i)
-		{
-			insert_point = i;
+			assert(0);
+			return rel_ptr<rel_ptr<T>>::null();
 		}
 	}
-	if (insert_point != mdesc->count)
-		memmove(mdesc->wdescs + insert_point + 1,
-			mdesc->wdescs + insert_point,
-			(mdesc->count - insert_point) * sizeof(*mdesc->wdescs));
+	wdesc_t wdesc = mdesc->wdescs + mdesc->count;
 
-	mdesc->wdescs[insert_point].addr = addr;
-	mdesc->wdescs[insert_point].expect = expect.rel();
-	mdesc->wdescs[insert_point].new_val = 0;
-	mdesc->wdescs[insert_point].mdesc = mdesc;
-	mdesc->wdescs[insert_point].recycle_func = !recycle ? mdesc->callback : recycle;
+	wdesc->addr = addr;
+	wdesc->expect = expect.rel();
+	wdesc->new_val = 0;
+	wdesc->mdesc = mdesc;
+	wdesc->recycle_func = !recycle ? mdesc->callback : recycle;
+	persist(wdesc.abs(), sizeof(*wdesc));
 
 	++mdesc->count;
-	return rel_ptr<rel_ptr<T>>((rel_ptr<T>*)&mdesc->wdescs[insert_point].new_val);
+	persist(&mdesc->count, sizeof(uint64_t));
+	return rel_ptr<rel_ptr<T>>((rel_ptr<T>*)&mdesc->wdescs[mdesc->count - 1].new_val);
 }
 
 #endif // !PMwCAS_H
